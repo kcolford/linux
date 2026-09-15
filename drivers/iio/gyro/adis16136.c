@@ -563,10 +563,10 @@ static int adis16136_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id adis16136_ids[] = {
-	{ "adis16133", ID_ADIS16133 },
-	{ "adis16135", ID_ADIS16135 },
-	{ "adis16136", ID_ADIS16136 },
-	{ "adis16137", ID_ADIS16137 },
+	{ .name = "adis16133", .driver_data = ID_ADIS16133 },
+	{ .name = "adis16135", .driver_data = ID_ADIS16135 },
+	{ .name = "adis16136", .driver_data = ID_ADIS16136 },
+	{ .name = "adis16137", .driver_data = ID_ADIS16137 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, adis16136_ids);
@@ -583,4 +583,4 @@ module_spi_driver(adis16136_driver);
 MODULE_AUTHOR("Lars-Peter Clausen <lars@metafoo.de>");
 MODULE_DESCRIPTION("Analog Devices ADIS16133/ADIS16135/ADIS16136 gyroscope driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ADISLIB);
+MODULE_IMPORT_NS("IIO_ADISLIB");

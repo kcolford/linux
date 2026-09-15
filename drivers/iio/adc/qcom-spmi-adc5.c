@@ -14,7 +14,6 @@
 #include <linux/log2.h>
 #include <linux/math64.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -830,7 +829,7 @@ static int adc5_get_fw_data(struct adc5_chip *adc)
 
 	adc->nchannels = device_get_child_node_count(adc->dev);
 	if (!adc->nchannels)
-		return -EINVAL;
+		return dev_err_probe(adc->dev, -EINVAL, "no channels defined\n");
 
 	adc->iio_chans = devm_kcalloc(adc->dev, adc->nchannels,
 				       sizeof(*adc->iio_chans), GFP_KERNEL);
@@ -903,7 +902,7 @@ static int adc5_probe(struct platform_device *pdev)
 
 	ret = adc5_get_fw_data(adc);
 	if (ret)
-		return dev_err_probe(dev, ret, "adc get dt data failed\n");
+		return ret;
 
 	irq_eoc = platform_get_irq(pdev, 0);
 	if (irq_eoc < 0) {

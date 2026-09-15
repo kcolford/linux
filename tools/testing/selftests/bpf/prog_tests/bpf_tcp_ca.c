@@ -14,11 +14,8 @@
 #include "tcp_ca_incompl_cong_ops.skel.h"
 #include "tcp_ca_unsupp_cong_op.skel.h"
 #include "tcp_ca_kfunc.skel.h"
+#include "tcp_ca_untrusted_btf_write.skel.h"
 #include "bpf_cc_cubic.skel.h"
-
-#ifndef ENOTSUPP
-#define ENOTSUPP 524
-#endif
 
 static const unsigned int total_bytes = 10 * 1024 * 1024;
 static int expected_stg = 0xeB9F;
@@ -49,7 +46,7 @@ static bool start_test(char *addr_str,
 		goto err;
 
 	/* connect to server */
-	*cli_fd = connect_to_fd_opts(*srv_fd, SOCK_STREAM, cli_opts);
+	*cli_fd = connect_to_fd_opts(*srv_fd, cli_opts);
 	if (!ASSERT_NEQ(*cli_fd, -1, "connect_to_fd_opts"))
 		goto err;
 
@@ -115,6 +112,10 @@ static void test_cubic(void)
 	do_test(&opts);
 
 	ASSERT_EQ(cubic_skel->bss->bpf_cubic_acked_called, 1, "pkts_acked called");
+
+	ASSERT_TRUE(cubic_skel->bss->nodelay_init_reject, "init reject nodelay option");
+	ASSERT_TRUE(cubic_skel->bss->nodelay_cwnd_event_tx_start_reject,
+		    "cwnd_event_tx_start reject nodelay option");
 
 	bpf_link__destroy(link);
 	bpf_cubic__destroy(cubic_skel);
@@ -285,7 +286,7 @@ static void test_dctcp_fallback(void)
 	dctcp_skel = bpf_dctcp__open();
 	if (!ASSERT_OK_PTR(dctcp_skel, "dctcp_skel"))
 		return;
-	strcpy(dctcp_skel->rodata->fallback, "cubic");
+	strscpy(dctcp_skel->rodata->fallback_cc, "cubic");
 	if (!ASSERT_OK(bpf_dctcp__load(dctcp_skel), "bpf_dctcp__load"))
 		goto done;
 
@@ -579,6 +580,15 @@ static void test_tcp_ca_kfunc(void)
 	tcp_ca_kfunc__destroy(skel);
 }
 
+static void test_untrusted_btf_write(void)
+{
+	struct tcp_ca_untrusted_btf_write *skel;
+
+	skel = tcp_ca_untrusted_btf_write__open_and_load();
+	ASSERT_ERR_PTR(skel, "tcp_ca_untrusted_btf_write__open_and_load");
+	tcp_ca_untrusted_btf_write__destroy(skel);
+}
+
 static void test_cc_cubic(void)
 {
 	struct cb_opts cb_opts = {
@@ -637,6 +647,8 @@ void test_bpf_tcp_ca(void)
 		test_link_replace();
 	if (test__start_subtest("tcp_ca_kfunc"))
 		test_tcp_ca_kfunc();
+	if (test__start_subtest("untrusted_btf_write"))
+		test_untrusted_btf_write();
 	if (test__start_subtest("cc_cubic"))
 		test_cc_cubic();
 	if (test__start_subtest("dctcp_autoattach_map"))

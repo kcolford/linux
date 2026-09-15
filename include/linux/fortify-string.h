@@ -2,7 +2,6 @@
 #ifndef _LINUX_FORTIFY_STRING_H_
 #define _LINUX_FORTIFY_STRING_H_
 
-#include <linux/bitfield.h>
 #include <linux/bug.h>
 #include <linux/const.h>
 #include <linux/limits.h>
@@ -10,10 +9,9 @@
 #define __FORTIFY_INLINE extern __always_inline __gnu_inline __overloadable
 #define __RENAME(x) __asm__(#x)
 
-#define FORTIFY_REASON_DIR(r)		FIELD_GET(BIT(0), r)
-#define FORTIFY_REASON_FUNC(r)		FIELD_GET(GENMASK(7, 1), r)
-#define FORTIFY_REASON(func, write)	(FIELD_PREP(BIT(0), write) | \
-					 FIELD_PREP(GENMASK(7, 1), func))
+#define FORTIFY_REASON_DIR(r)		((r) & 1)
+#define FORTIFY_REASON_FUNC(r)		((r) >> 1)
+#define FORTIFY_REASON(func, write)	((func) << 1 | (write))
 
 /* Overridden by KUnit tests. */
 #ifndef fortify_panic
@@ -28,7 +26,6 @@
 #define FORTIFY_WRITE		 1
 
 #define EACH_FORTIFY_FUNC(macro)	\
-	macro(strncpy),			\
 	macro(strnlen),			\
 	macro(strlen),			\
 	macro(strscpy),			\
@@ -97,8 +94,6 @@ extern char *__underlying_strcat(char *p, const char *q) __RENAME(strcat);
 extern char *__underlying_strcpy(char *p, const char *q) __RENAME(strcpy);
 extern __kernel_size_t __underlying_strlen(const char *p) __RENAME(strlen);
 extern char *__underlying_strncat(char *p, const char *q, __kernel_size_t count) __RENAME(strncat);
-extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size) __RENAME(strncpy);
-
 #else
 
 #if defined(__SANITIZE_MEMORY__)
@@ -122,7 +117,6 @@ extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size) 
 #define __underlying_strcpy	__builtin_strcpy
 #define __underlying_strlen	__builtin_strlen
 #define __underlying_strncat	__builtin_strncat
-#define __underlying_strncpy	__builtin_strncpy
 
 #endif
 
@@ -160,50 +154,6 @@ extern char *__underlying_strncpy(char *p, const char *q, __kernel_size_t size) 
 	__builtin_constant_p((bounds) < (length)) &&	\
 	(bounds) < (length)				\
 )
-
-/**
- * strncpy - Copy a string to memory with non-guaranteed NUL padding
- *
- * @p: pointer to destination of copy
- * @q: pointer to NUL-terminated source string to copy
- * @size: bytes to write at @p
- *
- * If strlen(@q) >= @size, the copy of @q will stop after @size bytes,
- * and @p will NOT be NUL-terminated
- *
- * If strlen(@q) < @size, following the copy of @q, trailing NUL bytes
- * will be written to @p until @size total bytes have been written.
- *
- * Do not use this function. While FORTIFY_SOURCE tries to avoid
- * over-reads of @q, it cannot defend against writing unterminated
- * results to @p. Using strncpy() remains ambiguous and fragile.
- * Instead, please choose an alternative, so that the expectation
- * of @p's contents is unambiguous:
- *
- * +--------------------+--------------------+------------+
- * | **p** needs to be: | padded to **size** | not padded |
- * +====================+====================+============+
- * |     NUL-terminated | strscpy_pad()      | strscpy()  |
- * +--------------------+--------------------+------------+
- * | not NUL-terminated | strtomem_pad()     | strtomem() |
- * +--------------------+--------------------+------------+
- *
- * Note strscpy*()'s differing return values for detecting truncation,
- * and strtomem*()'s expectation that the destination is marked with
- * __nonstring when it is a character array.
- *
- */
-__FORTIFY_INLINE __diagnose_as(__builtin_strncpy, 1, 2, 3)
-char *strncpy(char * const POS p, const char *q, __kernel_size_t size)
-{
-	const size_t p_size = __member_size(p);
-
-	if (__compiletime_lessthan(p_size, size))
-		__write_overflow();
-	if (p_size < size)
-		fortify_panic(FORTIFY_FUNC_strncpy, FORTIFY_WRITE, p_size, size, p);
-	return __underlying_strncpy(p, q, size);
-}
 
 extern __kernel_size_t __real_strnlen(const char *, __kernel_size_t) __RENAME(strnlen);
 /**
@@ -596,7 +546,7 @@ __FORTIFY_INLINE bool fortify_memcpy_chk(__kernel_size_t size,
 	if (p_size != SIZE_MAX && p_size < size)
 		fortify_panic(func, FORTIFY_WRITE, p_size, size, true);
 	else if (q_size != SIZE_MAX && q_size < size)
-		fortify_panic(func, FORTIFY_READ, p_size, size, true);
+		fortify_panic(func, FORTIFY_READ, q_size, size, true);
 
 	/*
 	 * Warn when writing beyond destination field size.
@@ -616,6 +566,12 @@ __FORTIFY_INLINE bool fortify_memcpy_chk(__kernel_size_t size,
 	return false;
 }
 
+/*
+ * To work around what seems to be an optimizer bug, the macro arguments
+ * need to have const copies or the values end up changed by the time they
+ * reach fortify_warn_once(). See commit 6f7630b1b5bc ("fortify: Capture
+ * __bos() results in const temp vars") for more details.
+ */
 #define __fortify_memcpy_chk(p, q, size, p_size, q_size,		\
 			     p_size_field, q_size_field, op) ({		\
 	const size_t __fortify_size = (size_t)(size);			\
@@ -623,6 +579,8 @@ __FORTIFY_INLINE bool fortify_memcpy_chk(__kernel_size_t size,
 	const size_t __q_size = (q_size);				\
 	const size_t __p_size_field = (p_size_field);			\
 	const size_t __q_size_field = (q_size_field);			\
+	/* Keep a mutable version of the size for the final copy. */	\
+	size_t __copy_size = __fortify_size;				\
 	fortify_warn_once(fortify_memcpy_chk(__fortify_size, __p_size,	\
 				     __q_size, __p_size_field,		\
 				     __q_size_field, FORTIFY_FUNC_ ##op), \
@@ -630,7 +588,11 @@ __FORTIFY_INLINE bool fortify_memcpy_chk(__kernel_size_t size,
 		  __fortify_size,					\
 		  "field \"" #p "\" at " FILE_LINE,			\
 		  __p_size_field);					\
-	__underlying_##op(p, q, __fortify_size);			\
+	/* Hide only the run-time size from value range tracking to */	\
+	/* silence compile-time false positive bounds warnings. */	\
+	if (!__builtin_constant_p(__copy_size))				\
+		OPTIMIZER_HIDE_VAR(__copy_size);			\
+	__underlying_##op(p, q, __copy_size);				\
 })
 
 /*
@@ -799,7 +761,6 @@ char *strcpy(char * const POS p, const char * const POS q)
 #undef __underlying_strcpy
 #undef __underlying_strlen
 #undef __underlying_strncat
-#undef __underlying_strncpy
 
 #undef POS
 #undef POS0

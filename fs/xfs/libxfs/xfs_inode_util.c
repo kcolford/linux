@@ -4,7 +4,7 @@
  * All Rights Reserved.
  */
 #include <linux/iversion.h>
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -130,6 +130,8 @@ xfs_ip2xflags(
 
 	if (xfs_inode_has_attr_fork(ip))
 		flags |= FS_XFLAG_HASATTR;
+	if (xfs_has_asciici(ip->i_mount))
+		flags |= FS_XFLAG_CASEFOLD;
 	return flags;
 }
 
@@ -224,6 +226,8 @@ xfs_inode_inherit_flags2(
 	}
 	if (pip->i_diflags2 & XFS_DIFLAG2_DAX)
 		ip->i_diflags2 |= XFS_DIFLAG2_DAX;
+	if (xfs_is_metadir_inode(pip))
+		ip->i_diflags2 |= XFS_DIFLAG2_METADATA;
 
 	/* Don't let invalid cowextsize hints propagate. */
 	failaddr = xfs_inode_validate_cowextsize(ip->i_mount, ip->i_cowextsize,
@@ -297,18 +301,7 @@ xfs_inode_init(
 		} else {
 			inode_init_owner(args->idmap, inode, dir, args->mode);
 		}
-
-		/*
-		 * If the group ID of the new file does not match the effective
-		 * group ID or one of the supplementary group IDs, the S_ISGID
-		 * bit is cleared (and only if the irix_sgid_inherit
-		 * compatibility variable is set).
-		 */
-		if (irix_sgid_inherit && (inode->i_mode & S_ISGID) &&
-		    !vfsgid_in_group_p(i_gid_into_vfsgid(args->idmap, inode)))
-			inode->i_mode &= ~S_ISGID;
-
-		ip->i_projid = pip ? xfs_get_initial_prid(pip) : 0;
+		ip->i_projid = xfs_get_initial_prid(pip);
 	}
 
 	ip->i_disk_size = 0;
@@ -320,6 +313,7 @@ xfs_inode_init(
 
 	if (xfs_has_v3inodes(mp)) {
 		inode_set_iversion(inode, 1);
+		/* also covers the di_used_blocks union arm: */
 		ip->i_cowextsize = 0;
 		times |= XFS_ICHGTIME_CREATE;
 	}
@@ -442,8 +436,8 @@ xfs_iunlink_update_bucket(
 	ASSERT(xfs_verify_agino_or_null(pag, new_agino));
 
 	old_value = be32_to_cpu(agi->agi_unlinked[bucket_index]);
-	trace_xfs_iunlink_update_bucket(tp->t_mountp, pag->pag_agno, bucket_index,
-			old_value, new_agino);
+	trace_xfs_iunlink_update_bucket(pag, bucket_index, old_value,
+			new_agino);
 
 	/*
 	 * We should never find the head of the list already set to the value
@@ -470,10 +464,9 @@ xfs_iunlink_insert_inode(
 	struct xfs_buf		*agibp,
 	struct xfs_inode	*ip)
 {
-	struct xfs_mount	*mp = tp->t_mountp;
 	struct xfs_agi		*agi = agibp->b_addr;
 	xfs_agino_t		next_agino;
-	xfs_agino_t		agino = XFS_INO_TO_AGINO(mp, ip->i_ino);
+	xfs_agino_t		agino = XFS_INODE_TO_AGINO(ip);
 	short			bucket_index = agino % XFS_AGI_UNLINKED_BUCKETS;
 	int			error;
 
@@ -537,7 +530,7 @@ xfs_iunlink(
 	ASSERT(VFS_I(ip)->i_mode != 0);
 	trace_xfs_iunlink(ip);
 
-	pag = xfs_perag_get(mp, XFS_INO_TO_AGNO(mp, ip->i_ino));
+	pag = xfs_perag_get(mp, XFS_INODE_TO_AGNO(ip));
 
 	/* Get the agi buffer first.  It ensures lock ordering on the list. */
 	error = xfs_read_agi(pag, tp, 0, &agibp);
@@ -559,7 +552,7 @@ xfs_iunlink_remove_inode(
 {
 	struct xfs_mount	*mp = tp->t_mountp;
 	struct xfs_agi		*agi = agibp->b_addr;
-	xfs_agino_t		agino = XFS_INO_TO_AGINO(mp, ip->i_ino);
+	xfs_agino_t		agino = XFS_INODE_TO_AGINO(ip);
 	xfs_agino_t		head_agino;
 	short			bucket_index = agino % XFS_AGI_UNLINKED_BUCKETS;
 	int			error;
@@ -661,7 +654,7 @@ xfs_droplink(
 	if (inode->i_nlink == 0) {
 		xfs_info_ratelimited(tp->t_mountp,
  "Inode 0x%llx link count dropped below zero.  Pinning link count.",
-				ip->i_ino);
+				I_INO(ip));
 		set_nlink(inode, XFS_NLINK_PINNED);
 	}
 	if (inode->i_nlink != XFS_NLINK_PINNED)
@@ -690,7 +683,7 @@ xfs_bumplink(
 	if (inode->i_nlink == XFS_NLINK_PINNED - 1)
 		xfs_info_ratelimited(tp->t_mountp,
  "Inode 0x%llx link count exceeded maximum.  Pinning link count.",
-				ip->i_ino);
+				I_INO(ip));
 	if (inode->i_nlink != XFS_NLINK_PINNED)
 		inc_nlink(inode);
 
@@ -714,7 +707,7 @@ xfs_inode_uninit(
 	 * makes the AGI lock -> unlinked list modification order the same as
 	 * used in O_TMPFILE creation.
 	 */
-	error = xfs_difree(tp, pag, ip->i_ino, xic);
+	error = xfs_difree(tp, pag, I_INO(ip), xic);
 	if (error)
 		return error;
 

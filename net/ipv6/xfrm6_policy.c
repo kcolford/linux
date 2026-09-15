@@ -23,23 +23,24 @@
 #include <net/ip6_route.h>
 #include <net/l3mdev.h>
 
-static struct dst_entry *xfrm6_dst_lookup(struct net *net, int tos, int oif,
-					  const xfrm_address_t *saddr,
-					  const xfrm_address_t *daddr,
-					  u32 mark)
+static struct dst_entry *xfrm6_dst_lookup(const struct xfrm_dst_lookup_params *params)
 {
 	struct flowi6 fl6;
 	struct dst_entry *dst;
 	int err;
 
 	memset(&fl6, 0, sizeof(fl6));
-	fl6.flowi6_l3mdev = l3mdev_master_ifindex_by_index(net, oif);
-	fl6.flowi6_mark = mark;
-	memcpy(&fl6.daddr, daddr, sizeof(fl6.daddr));
-	if (saddr)
-		memcpy(&fl6.saddr, saddr, sizeof(fl6.saddr));
+	fl6.flowi6_l3mdev = l3mdev_master_ifindex_by_index(params->net,
+							   params->oif);
+	fl6.flowi6_mark = params->mark;
+	memcpy(&fl6.daddr, params->daddr, sizeof(fl6.daddr));
+	if (params->saddr)
+		memcpy(&fl6.saddr, params->saddr, sizeof(fl6.saddr));
 
-	dst = ip6_route_output(net, NULL, &fl6);
+	fl6.flowi4_proto = params->ipproto;
+	fl6.uli = params->uli;
+
+	dst = ip6_route_output(params->net, NULL, &fl6);
 
 	err = dst->error;
 	if (dst->error) {
@@ -50,15 +51,15 @@ static struct dst_entry *xfrm6_dst_lookup(struct net *net, int tos, int oif,
 	return dst;
 }
 
-static int xfrm6_get_saddr(struct net *net, int oif,
-			   xfrm_address_t *saddr, xfrm_address_t *daddr,
-			   u32 mark)
+static int xfrm6_get_saddr(xfrm_address_t *saddr,
+			   const struct xfrm_dst_lookup_params *params)
 {
 	struct dst_entry *dst;
 	struct net_device *dev;
 	struct inet6_dev *idev;
+	int err;
 
-	dst = xfrm6_dst_lookup(net, 0, oif, NULL, daddr, mark);
+	dst = xfrm6_dst_lookup(params);
 	if (IS_ERR(dst))
 		return -EHOSTUNREACH;
 
@@ -68,8 +69,11 @@ static int xfrm6_get_saddr(struct net *net, int oif,
 		return -EHOSTUNREACH;
 	}
 	dev = idev->dev;
-	ipv6_dev_get_saddr(dev_net(dev), dev, &daddr->in6, 0, &saddr->in6);
+	err = ipv6_dev_get_saddr(dev_net(dev), dev, &params->daddr->in6, 0,
+				 &saddr->in6);
 	dst_release(dst);
+	if (err)
+		return -EHOSTUNREACH;
 	return 0;
 }
 
@@ -84,6 +88,7 @@ static int xfrm6_fill_dst(struct xfrm_dst *xdst, struct net_device *dev,
 	xdst->u.rt6.rt6i_idev = in6_dev_get(dev);
 	if (!xdst->u.rt6.rt6i_idev) {
 		netdev_put(dev, &xdst->u.dst.dev_tracker);
+		xdst->u.dst.dev = NULL;
 		return -ENODEV;
 	}
 
@@ -182,7 +187,7 @@ static void xfrm6_policy_fini(void)
 }
 
 #ifdef CONFIG_SYSCTL
-static struct ctl_table xfrm6_policy_table[] = {
+static const struct ctl_table xfrm6_policy_table[] = {
 	{
 		.procname       = "xfrm6_gc_thresh",
 		.data		= &init_net.xfrm.xfrm6_dst_ops.gc_thresh,
@@ -192,18 +197,30 @@ static struct ctl_table xfrm6_policy_table[] = {
 	},
 };
 
-static int __net_init xfrm6_net_sysctl_init(struct net *net)
+static const struct ctl_table *xfrm6_policy_table_dup(struct net *net)
 {
 	struct ctl_table *table;
+
+	table = kmemdup(xfrm6_policy_table, sizeof(xfrm6_policy_table),
+			GFP_KERNEL);
+	if (!table)
+		return NULL;
+
+	table[0].data = &net->xfrm.xfrm6_dst_ops.gc_thresh;
+
+	return table;
+}
+
+static int __net_init xfrm6_net_sysctl_init(struct net *net)
+{
+	const struct ctl_table *table;
 	struct ctl_table_header *hdr;
 
 	table = xfrm6_policy_table;
 	if (!net_eq(net, &init_net)) {
-		table = kmemdup(table, sizeof(xfrm6_policy_table), GFP_KERNEL);
+		table = xfrm6_policy_table_dup(net);
 		if (!table)
 			goto err_alloc;
-
-		table[0].data = &net->xfrm.xfrm6_dst_ops.gc_thresh;
 	}
 
 	hdr = register_net_sysctl_sz(net, "net/ipv6", table,

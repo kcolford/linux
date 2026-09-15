@@ -675,7 +675,7 @@ static void wait_for_xmitr(struct uart_port *port)
 	}
 
 	/* Wait up to 1s for flow control if necessary */
-	if (port->flags & UPF_CONS_FLOW) {
+	if (uart_cons_flow_enabled(port)) {
 		tmout = 1000000;
 		while (--tmout) {
 			unsigned int val;
@@ -838,11 +838,12 @@ static int bcm_uart_probe(struct platform_device *pdev)
 	port->irq = ret;
 
 	clk = clk_get(&pdev->dev, "refclk");
-	if (IS_ERR(clk) && pdev->dev.of_node)
-		clk = of_clk_get(pdev->dev.of_node, 0);
-
-	if (IS_ERR(clk))
-		return -ENODEV;
+	if (IS_ERR(clk)) {
+		if (pdev->dev.of_node)
+			clk = of_clk_get(pdev->dev.of_node, 0);
+		if (IS_ERR(clk))
+			return -ENODEV;
+	}
 
 	port->iotype = UPIO_MEM;
 	port->ops = &bcm_uart_ops;
@@ -884,7 +885,7 @@ MODULE_DEVICE_TABLE(of, bcm63xx_of_match);
  */
 static struct platform_driver bcm_uart_platform_driver = {
 	.probe	= bcm_uart_probe,
-	.remove_new = bcm_uart_remove,
+	.remove = bcm_uart_remove,
 	.driver	= {
 		.name  = "bcm63xx_uart",
 		.of_match_table = bcm63xx_of_match,

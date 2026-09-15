@@ -13,8 +13,6 @@
 
 #include <sound/soc.h>
 
-#include "mpc5200_dma.h"
-
 #define DRV_NAME "pcm030-audio-fabric"
 
 struct pcm030_audio_data {
@@ -124,7 +122,7 @@ MODULE_DEVICE_TABLE(of, pcm030_audio_match);
 
 static struct platform_driver pcm030_fabric_driver = {
 	.probe		= pcm030_fabric_probe,
-	.remove_new	= pcm030_fabric_remove,
+	.remove		= pcm030_fabric_remove,
 	.driver		= {
 		.name	= DRV_NAME,
 		.of_match_table    = pcm030_audio_match,

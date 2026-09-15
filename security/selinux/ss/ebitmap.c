@@ -25,12 +25,12 @@
 
 static struct kmem_cache *ebitmap_node_cachep __ro_after_init;
 
-int ebitmap_cmp(const struct ebitmap *e1, const struct ebitmap *e2)
+bool ebitmap_equal(const struct ebitmap *e1, const struct ebitmap *e2)
 {
 	const struct ebitmap_node *n1, *n2;
 
 	if (e1->highbit != e2->highbit)
-		return 0;
+		return false;
 
 	n1 = e1->node;
 	n2 = e2->node;
@@ -41,9 +41,9 @@ int ebitmap_cmp(const struct ebitmap *e1, const struct ebitmap *e2)
 	}
 
 	if (n1 || n2)
-		return 0;
+		return false;
 
-	return 1;
+	return true;
 }
 
 int ebitmap_cpy(struct ebitmap *dst, const struct ebitmap *src)
@@ -257,6 +257,33 @@ int ebitmap_contains(const struct ebitmap *e1, const struct ebitmap *e2,
 	return 1;
 }
 
+u32 ebitmap_get_highest_set_bit(const struct ebitmap *e)
+{
+	const struct ebitmap_node *n;
+	unsigned long unit;
+	u32 pos = 0;
+
+	n = e->node;
+	if (!n)
+		return 0;
+
+	while (n->next)
+		n = n->next;
+
+	for (unsigned int i = EBITMAP_UNIT_NUMS; i > 0; i--) {
+		unit = n->maps[i - 1];
+		if (unit == 0)
+			continue;
+
+		pos = (i - 1) * EBITMAP_UNIT_SIZE;
+		while (unit >>= 1)
+			pos++;
+		break;
+	}
+
+	return n->startbit + pos;
+}
+
 int ebitmap_get_bit(const struct ebitmap *e, u32 bit)
 {
 	const struct ebitmap_node *n;
@@ -360,7 +387,7 @@ void ebitmap_destroy(struct ebitmap *e)
 	e->node = NULL;
 }
 
-int ebitmap_read(struct ebitmap *e, void *fp)
+int ebitmap_read(struct ebitmap *e, struct policy_file *fp)
 {
 	struct ebitmap_node *n = NULL;
 	u32 mapunit, count, startbit, index, i;
@@ -478,7 +505,7 @@ bad:
 	goto out;
 }
 
-int ebitmap_write(const struct ebitmap *e, void *fp)
+int ebitmap_write(const struct ebitmap *e, struct policy_file *fp)
 {
 	struct ebitmap_node *n;
 	u32 bit, count, last_bit, last_startbit;
@@ -572,7 +599,5 @@ u32 ebitmap_hash(const struct ebitmap *e, u32 hash)
 
 void __init ebitmap_cache_init(void)
 {
-	ebitmap_node_cachep = kmem_cache_create("ebitmap_node",
-						sizeof(struct ebitmap_node), 0,
-						SLAB_PANIC, NULL);
+	ebitmap_node_cachep = KMEM_CACHE(ebitmap_node, SLAB_PANIC);
 }

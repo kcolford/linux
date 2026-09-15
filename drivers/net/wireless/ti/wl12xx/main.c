@@ -6,7 +6,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include <linux/err.h>
@@ -1882,7 +1881,7 @@ static int wl12xx_setup(struct wl1271 *wl)
 			wl1271_error("Invalid tcxo parameter %s", tcxo_param);
 	}
 
-	priv->rx_mem_addr = kmalloc(sizeof(*priv->rx_mem_addr), GFP_KERNEL);
+	priv->rx_mem_addr = kmalloc_obj(*priv->rx_mem_addr);
 	if (!priv->rx_mem_addr)
 		return -ENOMEM;
 
@@ -1939,7 +1938,7 @@ MODULE_DEVICE_TABLE(platform, wl12xx_id_table);
 
 static struct platform_driver wl12xx_driver = {
 	.probe		= wl12xx_probe,
-	.remove_new	= wl12xx_remove,
+	.remove		= wl12xx_remove,
 	.id_table	= wl12xx_id_table,
 	.driver = {
 		.name	= "wl12xx_driver",

@@ -13,7 +13,7 @@
 
 #include <linux/clk.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/amba.h>
 #include <linux/err.h>
 #include <linux/resource.h>
 #include <linux/regulator/consumer.h>
@@ -71,11 +71,6 @@ struct amba_device {
 	unsigned int		cid;
 	struct amba_cs_uci_id	uci;
 	unsigned int		irq[AMBA_NR_IRQS];
-	/*
-	 * Driver name to force a match.  Do not set directly, because core
-	 * frees it.  Use driver_set_override() to set or clear it.
-	 */
-	const char		*driver_override;
 };
 
 struct amba_driver {
@@ -105,7 +100,7 @@ enum amba_vendor {
 	AMBA_VENDOR_LSI = 0xb6,
 };
 
-extern struct bus_type amba_bustype;
+extern const struct bus_type amba_bustype;
 
 #define to_amba_device(d)	container_of_const(d, struct amba_device, dev)
 
@@ -121,6 +116,7 @@ extern struct bus_type amba_bustype;
 #ifdef CONFIG_ARM_AMBA
 int __amba_driver_register(struct amba_driver *, struct module *);
 void amba_driver_unregister(struct amba_driver *);
+bool dev_is_amba(const struct device *dev);
 #else
 static inline int __amba_driver_register(struct amba_driver *drv,
 					 struct module *owner)
@@ -129,6 +125,10 @@ static inline int __amba_driver_register(struct amba_driver *drv,
 }
 static inline void amba_driver_unregister(struct amba_driver *drv)
 {
+}
+static inline bool dev_is_amba(const struct device *dev)
+{
+	return false;
 }
 #endif
 

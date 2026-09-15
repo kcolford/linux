@@ -3,7 +3,6 @@
 #include <linux/kernel.h>
 #include <linux/spi/spi.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/regmap.h>
 
@@ -37,8 +36,8 @@ static void kxsd9_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id kxsd9_spi_id[] = {
-	{"kxsd9", 0},
-	{ },
+	{ .name = "kxsd9" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, kxsd9_spi_id);
 
@@ -63,4 +62,4 @@ module_spi_driver(kxsd9_spi_driver);
 MODULE_AUTHOR("Jonathan Cameron <jic23@kernel.org>");
 MODULE_DESCRIPTION("Kionix KXSD9 SPI driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_KXSD9);
+MODULE_IMPORT_NS("IIO_KXSD9");

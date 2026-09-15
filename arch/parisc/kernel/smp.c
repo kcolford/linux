@@ -297,7 +297,7 @@ smp_cpu_init(int cpunum)
 	enter_lazy_tlb(&init_mm, current);
 
 	init_IRQ();   /* make sure no IRQs are enabled or pending */
-	start_cpu_itimer();
+	parisc_clockevent_init();
 }
 
 
@@ -343,7 +343,7 @@ static int smp_boot_one_cpu(int cpuid, struct task_struct *idle)
 	for (i = 0; i < NR_IRQS; i++) {
 		struct irq_desc *desc = irq_to_desc(i);
 
-		if (desc && desc->kstat_irqs)
+		if (desc)
 			*per_cpu_ptr(desc->kstat_irqs, cpuid) = (struct irqstat) { };
 	}
 #endif

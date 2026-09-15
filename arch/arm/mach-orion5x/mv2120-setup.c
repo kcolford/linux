@@ -7,7 +7,7 @@
  * published by the Free Software Foundation; either version 2 of the
  * License, or (at your option) any later version.
  */
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/gpio/machine.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -238,7 +238,7 @@ static void __init mv2120_init(void)
 	if (gpio_request(MV2120_GPIO_POWER_OFF, "POWEROFF") != 0 ||
 	    gpio_direction_output(MV2120_GPIO_POWER_OFF, 1) != 0)
 		pr_err("mv2120: failed to setup power-off GPIO\n");
-	pm_power_off = mv2120_power_off;
+	register_platform_power_off(mv2120_power_off);
 }
 
 /* Warning: HP uses a wrong mach-type (=526) in their bootloader */

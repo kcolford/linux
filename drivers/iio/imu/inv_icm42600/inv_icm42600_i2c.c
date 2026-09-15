@@ -3,13 +3,12 @@
  * Copyright (C) 2020 InvenSense, Inc.
  */
 
-#include <linux/kernel.h>
 #include <linux/device.h>
-#include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
-#include <linux/regmap.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/property.h>
+#include <linux/regmap.h>
 
 #include "inv_icm42600.h"
 
@@ -67,9 +66,24 @@ static int inv_icm42600_probe(struct i2c_client *client)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
-	return inv_icm42600_core_probe(regmap, chip, client->irq,
-				       inv_icm42600_i2c_bus_setup);
+	return inv_icm42600_core_probe(regmap, chip, inv_icm42600_i2c_bus_setup);
 }
+
+/*
+ * device id table is used to identify what device can be
+ * supported by this driver
+ */
+static const struct i2c_device_id inv_icm42600_id[] = {
+	{ .name = "icm42600", .driver_data = INV_CHIP_ICM42600 },
+	{ .name = "icm42602", .driver_data = INV_CHIP_ICM42602 },
+	{ .name = "icm42605", .driver_data = INV_CHIP_ICM42605 },
+	{ .name = "icm42686", .driver_data = INV_CHIP_ICM42686 },
+	{ .name = "icm42622", .driver_data = INV_CHIP_ICM42622 },
+	{ .name = "icm42688", .driver_data = INV_CHIP_ICM42688 },
+	{ .name = "icm42631", .driver_data = INV_CHIP_ICM42631 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, inv_icm42600_id);
 
 static const struct of_device_id inv_icm42600_of_matches[] = {
 	{
@@ -94,7 +108,7 @@ static const struct of_device_id inv_icm42600_of_matches[] = {
 		.compatible = "invensense,icm42631",
 		.data = (void *)INV_CHIP_ICM42631,
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, inv_icm42600_of_matches);
 
@@ -104,6 +118,7 @@ static struct i2c_driver inv_icm42600_driver = {
 		.of_match_table = inv_icm42600_of_matches,
 		.pm = pm_ptr(&inv_icm42600_pm_ops),
 	},
+	.id_table = inv_icm42600_id,
 	.probe = inv_icm42600_probe,
 };
 module_i2c_driver(inv_icm42600_driver);
@@ -111,4 +126,4 @@ module_i2c_driver(inv_icm42600_driver);
 MODULE_AUTHOR("InvenSense, Inc.");
 MODULE_DESCRIPTION("InvenSense ICM-426xx I2C driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_ICM42600);
+MODULE_IMPORT_NS("IIO_ICM42600");

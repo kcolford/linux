@@ -1351,7 +1351,7 @@ static ssize_t pmu_cpumask_attr_show(struct device *dev,
 	struct pmu *pmu = dev_get_drvdata(dev);
 	struct cci_pmu *cci_pmu = to_cci_pmu(pmu);
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(cci_pmu->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(cci_pmu->cpu)));
 }
 
 static struct device_attribute pmu_cpumask_attr =
@@ -1705,7 +1705,7 @@ static struct platform_driver cci_pmu_driver = {
 		   .suppress_bind_attrs = true,
 		  },
 	.probe = cci_pmu_probe,
-	.remove_new = cci_pmu_remove,
+	.remove = cci_pmu_remove,
 };
 
 module_platform_driver(cci_pmu_driver);

@@ -9,7 +9,6 @@
 #include <linux/interconnect-provider.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -1421,7 +1420,7 @@ MODULE_DEVICE_TABLE(of, msm8939_noc_of_match);
 
 static struct platform_driver msm8939_noc_driver = {
 	.probe = qnoc_probe,
-	.remove_new = qnoc_remove,
+	.remove = qnoc_remove,
 	.driver = {
 		.name = "qnoc-msm8939",
 		.of_match_table = msm8939_noc_of_match,

@@ -230,8 +230,7 @@ static struct fscache_volume *fscache_alloc_volume(const char *volume_key,
 	if (IS_ERR(cache))
 		return NULL;
 
-	volume = kzalloc(struct_size(volume, coherency, coherency_len),
-			 GFP_KERNEL);
+	volume = kzalloc_flex(*volume, coherency, coherency_len);
 	if (!volume)
 		goto err_cache;
 
@@ -264,7 +263,7 @@ static struct fscache_volume *fscache_alloc_volume(const char *volume_key,
 	fscache_see_volume(volume, fscache_volume_new_acquire);
 	fscache_stat(&fscache_n_volumes);
 	up_write(&fscache_addremove_sem);
-	kleave(" = v=%x", volume->debug_id);
+	_leave(" = v=%x", volume->debug_id);
 	return volume;
 
 err_vol:
@@ -322,8 +321,7 @@ maybe_wait:
 	}
 	return;
 no_wait:
-	clear_bit_unlock(FSCACHE_VOLUME_CREATING, &volume->flags);
-	wake_up_bit(&volume->flags, FSCACHE_VOLUME_CREATING);
+	clear_and_wake_up_bit(FSCACHE_VOLUME_CREATING, &volume->flags);
 }
 
 /*
@@ -466,7 +464,7 @@ void fscache_withdraw_volume(struct fscache_volume *volume)
 {
 	int n_accesses;
 
-	kdebug("withdraw V=%x", volume->debug_id);
+	_debug("withdraw V=%x", volume->debug_id);
 
 	/* Allow wakeups on dec-to-0 */
 	n_accesses = atomic_dec_return(&volume->n_accesses);

@@ -54,12 +54,19 @@ struct mc_debug_data {
 
 static DEFINE_PER_CPU(struct mc_buffer, mc_buffer);
 static struct mc_debug_data mc_debug_data_early __initdata;
-static struct mc_debug_data __percpu *mc_debug_data __refdata =
-	&mc_debug_data_early;
+static struct mc_debug_data __percpu *mc_debug_data_ptr;
 DEFINE_PER_CPU(unsigned long, xen_mc_irq_flags);
 
 static struct static_key mc_debug __ro_after_init;
 static bool mc_debug_enabled __initdata;
+
+static struct mc_debug_data * __ref get_mc_debug(void)
+{
+	if (!mc_debug_data_ptr)
+		return &mc_debug_data_early;
+
+	return this_cpu_ptr(mc_debug_data_ptr);
+}
 
 static int __init xen_parse_mc_debug(char *arg)
 {
@@ -72,8 +79,8 @@ early_param("xen_mc_debug", xen_parse_mc_debug);
 
 static int __init mc_debug_enable(void)
 {
-	struct mc_debug_data __percpu *mcdb;
 	unsigned long flags;
+	struct mc_debug_data __percpu *mcdb;
 
 	if (!mc_debug_enabled)
 		return 0;
@@ -88,7 +95,7 @@ static int __init mc_debug_enable(void)
 	/* Be careful when switching to percpu debug data. */
 	local_irq_save(flags);
 	xen_mc_flush();
-	mc_debug_data = mcdb;
+	mc_debug_data_ptr = mcdb;
 	local_irq_restore(flags);
 
 	pr_info("xen_mc_debug active\n");
@@ -150,7 +157,7 @@ void xen_mc_flush(void)
 	trace_xen_mc_flush(b->mcidx, b->argidx, b->cbidx);
 
 	if (static_key_false(&mc_debug)) {
-		mcdb = this_cpu_ptr(mc_debug_data);
+		mcdb = get_mc_debug();
 		memcpy(mcdb->entries, b->entries,
 		       b->mcidx * sizeof(struct multicall_entry));
 	}
@@ -230,7 +237,7 @@ struct multicall_space __xen_mc_entry(size_t args)
 
 	ret.mc = &b->entries[b->mcidx];
 	if (static_key_false(&mc_debug)) {
-		struct mc_debug_data *mcdb = this_cpu_ptr(mc_debug_data);
+		struct mc_debug_data *mcdb = get_mc_debug();
 
 		mcdb->caller[b->mcidx] = __builtin_return_address(0);
 		mcdb->argsz[b->mcidx] = args;

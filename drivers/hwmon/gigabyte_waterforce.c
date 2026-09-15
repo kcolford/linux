@@ -11,7 +11,7 @@
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define DRIVER_NAME	"gigabyte_waterforce"
 
@@ -371,13 +371,15 @@ static int waterforce_probe(struct hid_device *hdev, const struct hid_device_id 
 	if (IS_ERR(priv->hwmon_dev)) {
 		ret = PTR_ERR(priv->hwmon_dev);
 		hid_err(hdev, "hwmon registration failed with %d\n", ret);
-		goto fail_and_close;
+		goto fail_and_io_stop;
 	}
 
 	waterforce_debugfs_init(priv);
 
 	return 0;
 
+fail_and_io_stop:
+	hid_device_io_stop(hdev);
 fail_and_close:
 	hid_hw_close(hdev);
 fail_and_stop:

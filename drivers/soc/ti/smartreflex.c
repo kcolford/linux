@@ -15,7 +15,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/interrupt.h>
 #include <linux/clk.h>
 #include <linux/io.h>
@@ -202,10 +201,10 @@ static int sr_late_init(struct omap_sr *sr_info)
 
 	if (sr_class->notify && sr_class->notify_flags && sr_info->irq) {
 		ret = devm_request_irq(&sr_info->pdev->dev, sr_info->irq,
-				       sr_interrupt, 0, sr_info->name, sr_info);
+				       sr_interrupt, IRQF_NO_AUTOEN,
+				       sr_info->name, sr_info);
 		if (ret)
 			goto error;
-		disable_irq(sr_info->irq);
 	}
 
 	return ret;
@@ -969,7 +968,7 @@ MODULE_DEVICE_TABLE(of, omap_sr_match);
 
 static struct platform_driver smartreflex_driver = {
 	.probe		= omap_sr_probe,
-	.remove_new     = omap_sr_remove,
+	.remove         = omap_sr_remove,
 	.shutdown	= omap_sr_shutdown,
 	.driver		= {
 		.name	= DRIVER_NAME,

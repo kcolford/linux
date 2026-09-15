@@ -33,6 +33,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/kexec.h>
 #include <linux/kgdb.h>
+#include <linux/kprobes.h>
 #include <linux/kvm_host.h>
 #include <linux/nmi.h>
 
@@ -45,6 +46,7 @@
 #include <asm/daifflags.h>
 #include <asm/kvm_mmu.h>
 #include <asm/mmu_context.h>
+#include <asm/nmi.h>
 #include <asm/numa.h>
 #include <asm/processor.h>
 #include <asm/smp_plat.h>
@@ -64,26 +66,20 @@ struct secondary_data secondary_data;
 /* Number of CPUs which aren't online, but looping in kernel text. */
 static int cpus_stuck_in_kernel;
 
-enum ipi_msg_type {
-	IPI_RESCHEDULE,
-	IPI_CALL_FUNC,
-	IPI_CPU_STOP,
-	IPI_CPU_CRASH_STOP,
-	IPI_TIMER,
-	IPI_IRQ_WORK,
-	NR_IPI,
-	/*
-	 * Any enum >= NR_IPI and < MAX_IPI is special and not tracable
-	 * with trace_ipi_*
-	 */
-	IPI_CPU_BACKTRACE = NR_IPI,
-	IPI_KGDB_ROUNDUP,
-	MAX_IPI
-};
-
 static int ipi_irq_base __ro_after_init;
 static int nr_ipi __ro_after_init = NR_IPI;
-static struct irq_desc *ipi_desc[MAX_IPI] __ro_after_init;
+
+struct ipi_descs {
+	struct irq_desc *descs[MAX_IPI];
+};
+
+static DEFINE_PER_CPU_READ_MOSTLY(struct ipi_descs, pcpu_ipi_desc);
+
+#define get_ipi_desc(__cpu, __ipi) (per_cpu_ptr(&pcpu_ipi_desc, __cpu)->descs[__ipi])
+
+static bool percpu_ipi_descs __ro_after_init;
+
+static bool crash_stop;
 
 static void ipi_setup(int cpu);
 
@@ -356,7 +352,7 @@ void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
 
 	/*
 	 * Now that the dying CPU is beyond the point of no return w.r.t.
-	 * in-kernel synchronisation, try to get the firwmare to help us to
+	 * in-kernel synchronisation, try to get the firmware to help us to
 	 * verify that it has really left the kernel before we consider
 	 * clobbering anything it might still be using.
 	 */
@@ -467,6 +463,8 @@ void __init smp_prepare_boot_cpu(void)
 		init_gic_priority_masking();
 
 	kasan_init_hw_tags();
+	/* Init percpu seeds for random tags after cpus are set up. */
+	kasan_init_sw_tags();
 }
 
 /*
@@ -527,7 +525,7 @@ int arch_register_cpu(int cpu)
 
 	/*
 	 * Availability of the acpi handle is sufficient to establish
-	 * that _STA has aleady been checked. No need to recheck here.
+	 * that _STA has already been checked. No need to recheck here.
 	 */
 	c->hotpluggable = arch_cpu_is_hotpluggable(cpu);
 
@@ -539,23 +537,13 @@ void arch_unregister_cpu(int cpu)
 {
 	acpi_handle acpi_handle = acpi_get_processor_handle(cpu);
 	struct cpu *c = &per_cpu(cpu_devices, cpu);
-	acpi_status status;
 	unsigned long long sta;
-
-	if (!acpi_handle) {
-		pr_err_once("Removing a CPU without associated ACPI handle\n");
-		return;
-	}
+	acpi_status status;
 
 	status = acpi_evaluate_integer(acpi_handle, "_STA", NULL, &sta);
-	if (ACPI_FAILURE(status))
-		return;
-
-	/* For now do not allow anything that looks like physical CPU HP */
-	if (cpu_present(cpu) && !(sta & ACPI_STA_DEVICE_PRESENT)) {
+	if (!ACPI_FAILURE(status) &&
+	    cpu_present(cpu) && !(sta & ACPI_STA_DEVICE_PRESENT))
 		pr_err_once("Changing CPU present bit is not supported\n");
-		return;
-	}
 
 	unregister_cpu(c);
 }
@@ -569,6 +557,11 @@ struct acpi_madt_generic_interrupt *acpi_cpu_get_madt_gicc(int cpu)
 	return &cpu_madt_gicc[cpu];
 }
 EXPORT_SYMBOL_GPL(acpi_cpu_get_madt_gicc);
+
+static bool acpi_cpu_is_present(int cpu)
+{
+	return acpi_cpu_get_madt_gicc(cpu)->flags & ACPI_MADT_ENABLED;
+}
 
 /*
  * acpi_map_gic_cpu_interface - parse processor MADT entry
@@ -674,6 +667,10 @@ static void __init acpi_parse_and_init_cpus(void)
 		early_map_cpu_to_node(i, acpi_numa_get_nid(i));
 }
 #else
+static bool acpi_cpu_is_present(int cpu)
+{
+	return false;
+}
 #define acpi_parse_and_init_cpus(...)	do { } while (0)
 #endif
 
@@ -749,15 +746,21 @@ void __init smp_init_cpus(void)
 	else
 		acpi_parse_and_init_cpus();
 
-	if (cpu_count > nr_cpu_ids)
-		pr_warn("Number of cores (%d) exceeds configured maximum of %u - clipping\n",
-			cpu_count, nr_cpu_ids);
-
 	if (!bootcpu_valid) {
 		pr_err("missing boot CPU MPIDR, not enabling secondaries\n");
 		return;
 	}
 
+	/*
+	 * For the nosmp/maxcpus=0 case, do not mark the secondary CPUs
+	 * possible.
+	 */
+	if (!setup_max_cpus)
+		return;
+
+	if (cpu_count > nr_cpu_ids)
+		pr_warn("Number of cores (%d) exceeds configured maximum of %u - clipping\n",
+			cpu_count, nr_cpu_ids);
 	/*
 	 * We need to set the cpu_logical_map entries before enabling
 	 * the cpus so that cpu processor description entries (DT cpu nodes
@@ -812,7 +815,8 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 		if (err)
 			continue;
 
-		set_cpu_present(cpu, true);
+		if (acpi_disabled || acpi_cpu_is_present(cpu))
+			set_cpu_present(cpu, true);
 		numa_store_cpu_info(cpu);
 	}
 }
@@ -821,7 +825,7 @@ static const char *ipi_types[MAX_IPI] __tracepoint_string = {
 	[IPI_RESCHEDULE]	= "Rescheduling interrupts",
 	[IPI_CALL_FUNC]		= "Function call interrupts",
 	[IPI_CPU_STOP]		= "CPU stop interrupts",
-	[IPI_CPU_CRASH_STOP]	= "CPU stop (for crash dump) interrupts",
+	[IPI_CPU_STOP_NMI]	= "CPU stop NMIs",
 	[IPI_TIMER]		= "Timer broadcast interrupts",
 	[IPI_IRQ_WORK]		= "IRQ work interrupts",
 	[IPI_CPU_BACKTRACE]	= "CPU backtrace interrupts",
@@ -837,11 +841,10 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 	unsigned int cpu, i;
 
 	for (i = 0; i < MAX_IPI; i++) {
-		seq_printf(p, "%*s%u:%s", prec - 1, "IPI", i,
-			   prec >= 4 ? " " : "");
+		seq_printf(p, "%*s%u: ", prec - 1, "IPI", i);
 		for_each_online_cpu(cpu)
-			seq_printf(p, "%10u ", irq_desc_kstat_cpu(ipi_desc[i], cpu));
-		seq_printf(p, "      %s\n", ipi_types[i]);
+			seq_printf(p, "%10u ", irq_desc_kstat_cpu(get_ipi_desc(cpu, i), cpu));
+		seq_printf(p, " %s\n", ipi_types[i]);
 	}
 
 	seq_printf(p, "%*s: %10lu\n", prec, "Err", irq_err_count);
@@ -865,14 +868,62 @@ void arch_irq_work_raise(void)
 }
 #endif
 
-static void __noreturn local_cpu_stop(void)
+/**
+ * arm64_nmi_cpu_stop() - stop the local CPU after it is told to stop.
+ * @regs: register state to record in the vmcore on a crash stop, or NULL for
+ *        panic_smp_self_stop(), which has no interrupted context to save.
+ * @die_on_crash: on the kdump crash path, power the CPU off via PSCI CPU_OFF
+ *                (so a capture kernel can reclaim it) rather than parking it.
+ *
+ * The single point every arm64 stop path funnels through, keeping the
+ * bookkeeping (mask interrupts, save the crash context, mark offline, mask
+ * SDEI, optionally power off) in one place:
+ *
+ *   - the regular IPI_CPU_STOP and pseudo-NMI IPI_CPU_STOP_NMI handlers;
+ *   - panic_smp_self_stop(), a CPU parking itself on a parallel panic();
+ *   - the SDEI cross-CPU NMI handler (drivers/firmware/arm_sdei_nmi.c),
+ *     which reaches CPUs the stop IPIs could not.
+ *
+ * The IPI stop handlers pass @die_on_crash true. The SDEI handler and
+ * panic_smp_self_stop() pass false and only park. For SDEI that is required,
+ * not just conservative: it runs inside an SDEI event that is deliberately
+ * never completed (completing it has firmware resume the wedged context), and
+ * a CPU_OFF from that not-yet-completed context wedges EL3 on some firmware --
+ * a documented follow-up. Parking also matches this path's own fallback when
+ * CPU_OFF is unavailable.
+ */
+void __noreturn arm64_nmi_cpu_stop(struct pt_regs *regs, bool die_on_crash)
 {
-	set_cpu_online(smp_processor_id(), false);
+	unsigned int cpu = smp_processor_id();
+	bool crash = IS_ENABLED(CONFIG_KEXEC_CORE) && crash_stop;
 
+	/*
+	 * Use local_daif_mask() instead of local_irq_disable() to make sure
+	 * that pseudo-NMIs are disabled. The "stop" code starts with an IRQ
+	 * and falls back to NMI (which might be pseudo). If the IRQ finally
+	 * goes through right as we're timing out then the NMI could interrupt
+	 * us. It's better to prevent the NMI and let the IRQ finish since the
+	 * pt_regs will be better.
+	 */
 	local_daif_mask();
+
+#ifdef CONFIG_KEXEC_CORE
+	if (crash && regs)
+		crash_save_cpu(regs, cpu);
+#endif
+
+	/* the ack a stop requester (e.g. smp_send_stop()) polls for */
+	set_cpu_online(cpu, false);
+
 	sdei_mask_local_cpu();
+
+	if (crash && die_on_crash)
+		__cpu_try_die(cpu);
+
+	/* just in case */
 	cpu_park_loop();
 }
+NOKPROBE_SYMBOL(arm64_nmi_cpu_stop);
 
 /*
  * We need to implement panic_smp_self_stop() for parallel panic() calls, so
@@ -881,40 +932,37 @@ static void __noreturn local_cpu_stop(void)
  */
 void __noreturn panic_smp_self_stop(void)
 {
-	local_cpu_stop();
+	arm64_nmi_cpu_stop(NULL, false);
 }
 
-#ifdef CONFIG_KEXEC_CORE
-static atomic_t waiting_for_crash_ipi = ATOMIC_INIT(0);
-#endif
-
-static void __noreturn ipi_cpu_crash_stop(unsigned int cpu, struct pt_regs *regs)
+static void arm64_send_ipi(const cpumask_t *mask, unsigned int nr)
 {
-#ifdef CONFIG_KEXEC_CORE
-	crash_save_cpu(regs, cpu);
+	unsigned int cpu;
 
-	atomic_dec(&waiting_for_crash_ipi);
-
-	local_irq_disable();
-	sdei_mask_local_cpu();
-
-	if (IS_ENABLED(CONFIG_HOTPLUG_CPU))
-		__cpu_try_die(cpu);
-
-	/* just in case */
-	cpu_park_loop();
-#else
-	BUG();
-#endif
+	if (!percpu_ipi_descs)
+		__ipi_send_mask(get_ipi_desc(0, nr), mask);
+	else
+		for_each_cpu(cpu, mask)
+			__ipi_send_single(get_ipi_desc(cpu, nr), cpu);
 }
 
 static void arm64_backtrace_ipi(cpumask_t *mask)
 {
-	__ipi_send_mask(ipi_desc[IPI_CPU_BACKTRACE], mask);
+	arm64_send_ipi(mask, IPI_CPU_BACKTRACE);
 }
 
 void arch_trigger_cpumask_backtrace(const cpumask_t *mask, int exclude_cpu)
 {
+	/*
+	 * Prefer the SDEI cross-CPU NMI provider when active: firmware
+	 * dispatches the event out of EL3 and reaches CPUs that have
+	 * interrupts locally masked, without the per-IRQ-mask cost that
+	 * pseudo-NMI pays for the same reach. The plain IPI path below
+	 * can't reach such a CPU unless pseudo-NMI is enabled.
+	 */
+	if (sdei_nmi_trigger_cpumask_backtrace(mask, exclude_cpu))
+		return;
+
 	/*
 	 * NOTE: though nmi_trigger_cpumask_backtrace() has "nmi_" in the name,
 	 * nothing about it truly needs to be implemented using an NMI, it's
@@ -935,7 +983,7 @@ void kgdb_roundup_cpus(void)
 		if (cpu == this_cpu)
 			continue;
 
-		__ipi_send_single(ipi_desc[IPI_KGDB_ROUNDUP], cpu);
+		__ipi_send_single(get_ipi_desc(cpu, IPI_KGDB_ROUNDUP), cpu);
 	}
 }
 #endif
@@ -960,15 +1008,8 @@ static void do_handle_IPI(int ipinr)
 		break;
 
 	case IPI_CPU_STOP:
-		local_cpu_stop();
-		break;
-
-	case IPI_CPU_CRASH_STOP:
-		if (IS_ENABLED(CONFIG_KEXEC_CORE)) {
-			ipi_cpu_crash_stop(cpu, get_irq_regs());
-
-			unreachable();
-		}
+	case IPI_CPU_STOP_NMI:
+		arm64_nmi_cpu_stop(get_irq_regs(), true);
 		break;
 
 #ifdef CONFIG_GENERIC_CLOCKEVENTS_BROADCAST
@@ -1006,14 +1047,16 @@ static void do_handle_IPI(int ipinr)
 
 static irqreturn_t ipi_handler(int irq, void *data)
 {
-	do_handle_IPI(irq - ipi_irq_base);
+	unsigned int ipi = (irq - ipi_irq_base) % nr_ipi;
+
+	do_handle_IPI(ipi);
 	return IRQ_HANDLED;
 }
 
 static void smp_cross_call(const struct cpumask *target, unsigned int ipinr)
 {
 	trace_ipi_raise(target, ipi_types[ipinr]);
-	__ipi_send_mask(ipi_desc[ipinr], target);
+	arm64_send_ipi(target, ipinr);
 }
 
 static bool ipi_should_be_nmi(enum ipi_msg_type ipi)
@@ -1022,8 +1065,7 @@ static bool ipi_should_be_nmi(enum ipi_msg_type ipi)
 		return false;
 
 	switch (ipi) {
-	case IPI_CPU_STOP:
-	case IPI_CPU_CRASH_STOP:
+	case IPI_CPU_STOP_NMI:
 	case IPI_CPU_BACKTRACE:
 	case IPI_KGDB_ROUNDUP:
 		return true;
@@ -1040,11 +1082,15 @@ static void ipi_setup(int cpu)
 		return;
 
 	for (i = 0; i < nr_ipi; i++) {
-		if (ipi_should_be_nmi(i)) {
-			prepare_percpu_nmi(ipi_irq_base + i);
-			enable_percpu_nmi(ipi_irq_base + i, 0);
+		if (!percpu_ipi_descs) {
+			if (ipi_should_be_nmi(i)) {
+				prepare_percpu_nmi(ipi_irq_base + i);
+				enable_percpu_nmi(ipi_irq_base + i, 0);
+			} else {
+				enable_percpu_irq(ipi_irq_base + i, 0);
+			}
 		} else {
-			enable_percpu_irq(ipi_irq_base + i, 0);
+			enable_irq(irq_desc_get_irq(get_ipi_desc(cpu, i)));
 		}
 	}
 }
@@ -1058,43 +1104,76 @@ static void ipi_teardown(int cpu)
 		return;
 
 	for (i = 0; i < nr_ipi; i++) {
-		if (ipi_should_be_nmi(i)) {
-			disable_percpu_nmi(ipi_irq_base + i);
-			teardown_percpu_nmi(ipi_irq_base + i);
+		if (!percpu_ipi_descs) {
+			if (ipi_should_be_nmi(i)) {
+				disable_percpu_nmi(ipi_irq_base + i);
+				teardown_percpu_nmi(ipi_irq_base + i);
+			} else {
+				disable_percpu_irq(ipi_irq_base + i);
+			}
 		} else {
-			disable_percpu_irq(ipi_irq_base + i);
+			disable_irq_nosync(irq_desc_get_irq(get_ipi_desc(cpu, i)));
 		}
 	}
 }
 #endif
 
-void __init set_smp_ipi_range(int ipi_base, int n)
+static void ipi_setup_sgi(int ipi)
+{
+	int err, irq, cpu;
+
+	irq = ipi_irq_base + ipi;
+
+	if (ipi_should_be_nmi(ipi)) {
+		err = request_percpu_nmi(irq, ipi_handler, "IPI", NULL, &irq_stat);
+		WARN(err, "Could not request IRQ %d as NMI, err=%d\n", irq, err);
+	} else {
+		err = request_percpu_irq(irq, ipi_handler, "IPI", &irq_stat);
+		WARN(err, "Could not request IRQ %d as IRQ, err=%d\n", irq, err);
+	}
+
+	for_each_possible_cpu(cpu)
+		get_ipi_desc(cpu, ipi) = irq_to_desc(irq);
+
+	irq_set_status_flags(irq, IRQ_HIDDEN);
+}
+
+static void ipi_setup_lpi(int ipi, int ncpus)
+{
+	for (int cpu = 0; cpu < ncpus; cpu++) {
+		int err, irq;
+
+		irq = ipi_irq_base + (cpu * nr_ipi) + ipi;
+
+		err = irq_force_affinity(irq, cpumask_of(cpu));
+		WARN(err, "Could not force affinity IRQ %d, err=%d\n", irq, err);
+
+		err = request_irq(irq, ipi_handler, IRQF_NO_AUTOEN, "IPI",
+				  NULL);
+		WARN(err, "Could not request IRQ %d, err=%d\n", irq, err);
+
+		irq_set_status_flags(irq, (IRQ_HIDDEN | IRQ_NO_BALANCING_MASK));
+
+		get_ipi_desc(cpu, ipi) = irq_to_desc(irq);
+	}
+}
+
+void __init set_smp_ipi_range_percpu(int ipi_base, int n, int ncpus)
 {
 	int i;
 
 	WARN_ON(n < MAX_IPI);
 	nr_ipi = min(n, MAX_IPI);
 
-	for (i = 0; i < nr_ipi; i++) {
-		int err;
-
-		if (ipi_should_be_nmi(i)) {
-			err = request_percpu_nmi(ipi_base + i, ipi_handler,
-						 "IPI", &irq_stat);
-			WARN(err, "Could not request IPI %d as NMI, err=%d\n",
-			     i, err);
-		} else {
-			err = request_percpu_irq(ipi_base + i, ipi_handler,
-						 "IPI", &irq_stat);
-			WARN(err, "Could not request IPI %d as IRQ, err=%d\n",
-			     i, err);
-		}
-
-		ipi_desc[i] = irq_to_desc(ipi_base + i);
-		irq_set_status_flags(ipi_base + i, IRQ_HIDDEN);
-	}
-
+	percpu_ipi_descs = !!ncpus;
 	ipi_irq_base = ipi_base;
+
+	for (i = 0; i < nr_ipi; i++) {
+		if (!percpu_ipi_descs)
+			ipi_setup_sgi(i);
+		else
+			ipi_setup_lpi(i, ncpus);
+	}
 
 	/* Setup the boot CPU immediately */
 	ipi_setup(smp_processor_id());
@@ -1136,46 +1215,9 @@ static inline unsigned int num_other_online_cpus(void)
 
 void smp_send_stop(void)
 {
+	static unsigned long stop_in_progress;
+	static cpumask_t mask;
 	unsigned long timeout;
-
-	if (num_other_online_cpus()) {
-		cpumask_t mask;
-
-		cpumask_copy(&mask, cpu_online_mask);
-		cpumask_clear_cpu(smp_processor_id(), &mask);
-
-		if (system_state <= SYSTEM_RUNNING)
-			pr_crit("SMP: stopping secondary CPUs\n");
-		smp_cross_call(&mask, IPI_CPU_STOP);
-	}
-
-	/* Wait up to one second for other CPUs to stop */
-	timeout = USEC_PER_SEC;
-	while (num_other_online_cpus() && timeout--)
-		udelay(1);
-
-	if (num_other_online_cpus())
-		pr_warn("SMP: failed to stop secondary CPUs %*pbl\n",
-			cpumask_pr_args(cpu_online_mask));
-
-	sdei_mask_local_cpu();
-}
-
-#ifdef CONFIG_KEXEC_CORE
-void crash_smp_send_stop(void)
-{
-	static int cpus_stopped;
-	cpumask_t mask;
-	unsigned long timeout;
-
-	/*
-	 * This function can be called twice in panic path, but obviously
-	 * we execute this only once.
-	 */
-	if (cpus_stopped)
-		return;
-
-	cpus_stopped = 1;
 
 	/*
 	 * If this cpu is the only one alive at this point in time, online or
@@ -1184,31 +1226,120 @@ void crash_smp_send_stop(void)
 	if (num_other_online_cpus() == 0)
 		goto skip_ipi;
 
+	/* Only proceed if this is the first CPU to reach this code */
+	if (test_and_set_bit(0, &stop_in_progress))
+		return;
+
+	/*
+	 * Send an IPI to all currently online CPUs except the CPU running
+	 * this code.
+	 *
+	 * NOTE: we don't do anything here to prevent other CPUs from coming
+	 * online after we snapshot `cpu_online_mask`. Ideally, the calling code
+	 * should do something to prevent other CPUs from coming up. This code
+	 * can be called in the panic path and thus it doesn't seem wise to
+	 * grab the CPU hotplug mutex ourselves. Worst case:
+	 * - If a CPU comes online as we're running, we'll likely notice it
+	 *   during the 1 second wait below and then we'll catch it when we try
+	 *   with an NMI (assuming NMIs are enabled) since we re-snapshot the
+	 *   mask before sending an NMI.
+	 * - If we leave the function and see that CPUs are still online we'll
+	 *   at least print a warning. Especially without NMIs this function
+	 *   isn't foolproof anyway so calling code will just have to accept
+	 *   the fact that there could be cases where a CPU can't be stopped.
+	 */
 	cpumask_copy(&mask, cpu_online_mask);
 	cpumask_clear_cpu(smp_processor_id(), &mask);
 
-	atomic_set(&waiting_for_crash_ipi, num_other_online_cpus());
+	if (system_state <= SYSTEM_RUNNING)
+		pr_crit("SMP: stopping secondary CPUs\n");
 
-	pr_crit("SMP: stopping secondary CPUs\n");
-	smp_cross_call(&mask, IPI_CPU_CRASH_STOP);
-
-	/* Wait up to one second for other CPUs to stop */
+	/*
+	 * Start with a normal IPI and wait up to one second for other CPUs to
+	 * stop. We do this first because it gives other processors a chance
+	 * to exit critical sections / drop locks and makes the rest of the
+	 * stop process (especially console flush) more robust.
+	 */
+	smp_cross_call(&mask, IPI_CPU_STOP);
 	timeout = USEC_PER_SEC;
-	while ((atomic_read(&waiting_for_crash_ipi) > 0) && timeout--)
+	while (num_other_online_cpus() && timeout--)
 		udelay(1);
 
-	if (atomic_read(&waiting_for_crash_ipi) > 0)
+	/*
+	 * If CPUs are still online, try an NMI. There's no excuse for this to
+	 * be slow, so we only give them an extra 10 ms to respond.
+	 */
+	if (num_other_online_cpus() && ipi_should_be_nmi(IPI_CPU_STOP_NMI)) {
+		smp_rmb();
+		cpumask_copy(&mask, cpu_online_mask);
+		cpumask_clear_cpu(smp_processor_id(), &mask);
+
+		pr_info("SMP: retry stop with NMI for CPUs %*pbl\n",
+			cpumask_pr_args(&mask));
+
+		smp_cross_call(&mask, IPI_CPU_STOP_NMI);
+		timeout = USEC_PER_MSEC * 10;
+		while (num_other_online_cpus() && timeout--)
+			udelay(1);
+	}
+
+	/*
+	 * If CPUs are *still* online, try the SDEI cross-CPU NMI. Firmware
+	 * delivers it regardless of the target's DAIF state, so it reaches
+	 * a CPU spinning with interrupts masked, which neither rung above
+	 * could (without pseudo-NMI there is no NMI rung at all). Allow
+	 * 100ms: a firmware round-trip per CPU, with headroom.
+	 */
+	if (num_other_online_cpus() && sdei_nmi_active()) {
+		/* re-snapshot after the rungs above took CPUs offline */
+		smp_rmb();
+		cpumask_copy(&mask, cpu_online_mask);
+		cpumask_clear_cpu(smp_processor_id(), &mask);
+
+		pr_info("SMP: retry stop with SDEI NMI for CPUs %*pbl\n",
+			cpumask_pr_args(&mask));
+
+		sdei_nmi_stop_cpus(&mask);
+		timeout = USEC_PER_MSEC * 100;
+		while (num_other_online_cpus() && timeout--)
+			udelay(1);
+	}
+
+	if (num_other_online_cpus()) {
+		smp_rmb();
+		cpumask_copy(&mask, cpu_online_mask);
+		cpumask_clear_cpu(smp_processor_id(), &mask);
+
 		pr_warn("SMP: failed to stop secondary CPUs %*pbl\n",
 			cpumask_pr_args(&mask));
+	}
 
 skip_ipi:
 	sdei_mask_local_cpu();
+}
+
+#ifdef CONFIG_KEXEC_CORE
+void crash_smp_send_stop(void)
+{
+	/*
+	 * This function can be called twice in panic path, but obviously
+	 * we execute this only once.
+	 *
+	 * We use this same boolean to tell whether the IPI we send was a
+	 * stop or a "crash stop".
+	 */
+	if (crash_stop)
+		return;
+	crash_stop = 1;
+
+	smp_send_stop();
+
 	sdei_handler_abort();
 }
 
 bool smp_crash_stop_failed(void)
 {
-	return (atomic_read(&waiting_for_crash_ipi) > 0);
+	return num_other_online_cpus() != 0;
 }
 #endif
 

@@ -270,6 +270,8 @@ configured for Unix Extensions (and the client has not disabled
 illegal Windows/NTFS/SMB characters to a remap range (this mount parameter
 is the default for SMB3). This remap (``mapposix``) range is also
 compatible with Mac (and "Services for Mac" on some older Windows).
+When POSIX Extensions for SMB 3.1.1 are negotiated, remapping is automatically
+disabled.
 
 CIFS VFS Mount Options
 ======================
@@ -742,7 +744,7 @@ SecurityFlags		Flags which control security negotiation and
 			  may use NTLMSSP               		0x00080
 			  must use NTLMSSP           			0x80080
 			  seal (packet encryption)			0x00040
-			  must seal (not implemented yet)               0x40040
+			  must seal                                     0x40040
 
 cifsFYI			If set to non-zero value, additional debug information
 			will be logged to the system error log.  This field

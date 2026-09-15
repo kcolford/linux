@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR MIT
 /**************************************************************************
  *
- * Copyright 2009-2023 VMware, Inc., Palo Alto, CA., USA
+ * Copyright (c) 2009-2024 Broadcom. All Rights Reserved. The term
+ * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -147,8 +148,9 @@ static int vmw_ldu_fb_pin(struct vmw_framebuffer *vfb)
 	struct vmw_bo *buf;
 	int ret;
 
-	buf = vfb->bo ?  vmw_framebuffer_to_vfbd(&vfb->base)->buffer :
-		vmw_framebuffer_to_vfbs(&vfb->base)->surface->res.guest_memory_bo;
+	buf = vfb->bo ?
+		vmw_framebuffer_to_vfbd(&vfb->base)->buffer :
+		vmw_user_object_buffer(&vmw_framebuffer_to_vfbs(&vfb->base)->uo);
 
 	if (!buf)
 		return 0;
@@ -169,8 +171,10 @@ static int vmw_ldu_fb_unpin(struct vmw_framebuffer *vfb)
 	struct vmw_private *dev_priv = vmw_priv(vfb->base.dev);
 	struct vmw_bo *buf;
 
-	buf = vfb->bo ?  vmw_framebuffer_to_vfbd(&vfb->base)->buffer :
-		vmw_framebuffer_to_vfbs(&vfb->base)->surface->res.guest_memory_bo;
+	buf = vfb->bo ?
+		vmw_framebuffer_to_vfbd(&vfb->base)->buffer :
+		vmw_user_object_buffer(&vmw_framebuffer_to_vfbs(&vfb->base)->uo);
+
 
 	if (WARN_ON(!buf))
 		return 0;
@@ -306,7 +310,7 @@ static int vmw_kms_ldu_do_bo_dirty(struct vmw_private *dev_priv,
 
 static void
 vmw_ldu_primary_plane_atomic_update(struct drm_plane *plane,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state,
 									   plane);
@@ -368,7 +372,7 @@ static const struct drm_plane_funcs vmw_ldu_plane_funcs = {
 static const struct drm_plane_funcs vmw_ldu_cursor_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
-	.destroy = vmw_du_cursor_plane_destroy,
+	.destroy = vmw_cursor_plane_destroy,
 	.reset = vmw_du_plane_reset,
 	.atomic_duplicate_state = vmw_du_plane_duplicate_state,
 	.atomic_destroy_state = vmw_du_plane_destroy_state,
@@ -379,10 +383,10 @@ static const struct drm_plane_funcs vmw_ldu_cursor_funcs = {
  */
 static const struct
 drm_plane_helper_funcs vmw_ldu_cursor_plane_helper_funcs = {
-	.atomic_check = vmw_du_cursor_plane_atomic_check,
-	.atomic_update = vmw_du_cursor_plane_atomic_update,
-	.prepare_fb = vmw_du_cursor_plane_prepare_fb,
-	.cleanup_fb = vmw_du_cursor_plane_cleanup_fb,
+	.atomic_check = vmw_cursor_plane_atomic_check,
+	.atomic_update = vmw_cursor_plane_atomic_update,
+	.prepare_fb = vmw_cursor_plane_prepare_fb,
+	.cleanup_fb = vmw_cursor_plane_cleanup_fb,
 };
 
 static const struct
@@ -398,6 +402,7 @@ static const struct drm_crtc_helper_funcs vmw_ldu_crtc_helper_funcs = {
 	.atomic_flush = vmw_vkms_crtc_atomic_flush,
 	.atomic_enable = vmw_vkms_crtc_atomic_enable,
 	.atomic_disable = vmw_vkms_crtc_atomic_disable,
+	.handle_vblank_timeout  = vmw_vkms_handle_vblank_timeout,
 };
 
 
@@ -412,7 +417,7 @@ static int vmw_ldu_init(struct vmw_private *dev_priv, unsigned unit)
 	struct drm_crtc *crtc;
 	int ret;
 
-	ldu = kzalloc(sizeof(*ldu), GFP_KERNEL);
+	ldu = kzalloc_obj(*ldu);
 	if (!ldu)
 		return -ENOMEM;
 
@@ -475,7 +480,6 @@ static int vmw_ldu_init(struct vmw_private *dev_priv, unsigned unit)
 	}
 
 	drm_connector_helper_add(connector, &vmw_ldu_connector_helper_funcs);
-	connector->status = vmw_du_connector_detect(connector, true);
 
 	ret = drm_encoder_init(dev, encoder, &vmw_legacy_encoder_funcs,
 			       DRM_MODE_ENCODER_VIRTUAL, NULL);
@@ -544,7 +548,7 @@ int vmw_kms_ldu_init_display(struct vmw_private *dev_priv)
 		return -EINVAL;
 	}
 
-	dev_priv->ldu_priv = kmalloc(sizeof(*dev_priv->ldu_priv), GFP_KERNEL);
+	dev_priv->ldu_priv = kmalloc_obj(*dev_priv->ldu_priv);
 	if (!dev_priv->ldu_priv)
 		return -ENOMEM;
 

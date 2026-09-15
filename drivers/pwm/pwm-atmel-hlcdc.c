@@ -217,24 +217,21 @@ static const struct of_device_id atmel_hlcdc_dt_ids[] = {
 		.compatible = "atmel,at91sam9n12-hlcdc",
 		/* 9n12 has same errata as 9x5 HLCDC PWM */
 		.data = &atmel_hlcdc_pwm_at91sam9x5_errata,
-	},
-	{
+	}, {
 		.compatible = "atmel,at91sam9x5-hlcdc",
 		.data = &atmel_hlcdc_pwm_at91sam9x5_errata,
-	},
-	{
+	}, {
 		.compatible = "atmel,sama5d2-hlcdc",
-	},
-	{
+	}, {
 		.compatible = "atmel,sama5d3-hlcdc",
 		.data = &atmel_hlcdc_pwm_sama5d3_errata,
-	},
-	{
+	}, {
 		.compatible = "atmel,sama5d4-hlcdc",
 		.data = &atmel_hlcdc_pwm_sama5d3_errata,
+	}, {
+		.compatible = "microchip,sam9x60-hlcdc",
 	},
-	{	.compatible = "microchip,sam9x60-hlcdc", },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, atmel_hlcdc_dt_ids);
 
@@ -288,8 +285,9 @@ static void atmel_hlcdc_pwm_remove(struct platform_device *pdev)
 
 static const struct of_device_id atmel_hlcdc_pwm_dt_ids[] = {
 	{ .compatible = "atmel,hlcdc-pwm" },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, atmel_hlcdc_pwm_dt_ids);
 
 static struct platform_driver atmel_hlcdc_pwm_driver = {
 	.driver = {
@@ -298,7 +296,7 @@ static struct platform_driver atmel_hlcdc_pwm_driver = {
 		.pm = pm_ptr(&atmel_hlcdc_pwm_pm_ops),
 	},
 	.probe = atmel_hlcdc_pwm_probe,
-	.remove_new = atmel_hlcdc_pwm_remove,
+	.remove = atmel_hlcdc_pwm_remove,
 };
 module_platform_driver(atmel_hlcdc_pwm_driver);
 

@@ -171,6 +171,7 @@ struct led_classdev {
 	int			 new_blink_brightness;
 	void			(*flash_resume)(struct led_classdev *led_cdev);
 
+	struct workqueue_struct *wq;			/* LED workqueue */
 	struct work_struct	set_brightness_work;
 	int			delayed_set_value;
 	unsigned long		delayed_delay_on;
@@ -238,7 +239,7 @@ struct led_classdev {
 	struct kernfs_node	*brightness_hw_changed_kn;
 #endif
 
-	/* Ensures consistent access to the LED Flash Class device */
+	/* Ensures consistent access to the LED class device */
 	struct mutex		led_access;
 };
 
@@ -293,7 +294,6 @@ void led_remove_lookup(struct led_lookup_data *led_lookup);
 struct led_classdev *__must_check led_get(struct device *dev, char *con_id);
 struct led_classdev *__must_check devm_led_get(struct device *dev, char *con_id);
 
-extern struct led_classdev *of_led_get(struct device_node *np, int index);
 extern void led_put(struct led_classdev *led_cdev);
 struct led_classdev *__must_check devm_of_led_get(struct device *dev,
 						  int index);
@@ -607,10 +607,16 @@ enum led_trigger_netdev_modes {
 	TRIGGER_NETDEV_LINK_2500,
 	TRIGGER_NETDEV_LINK_5000,
 	TRIGGER_NETDEV_LINK_10000,
+	TRIGGER_NETDEV_LINK_25000,
+	TRIGGER_NETDEV_LINK_40000,
+	TRIGGER_NETDEV_LINK_50000,
+	TRIGGER_NETDEV_LINK_100000,
 	TRIGGER_NETDEV_HALF_DUPLEX,
 	TRIGGER_NETDEV_FULL_DUPLEX,
 	TRIGGER_NETDEV_TX,
 	TRIGGER_NETDEV_RX,
+	TRIGGER_NETDEV_TX_ERR,
+	TRIGGER_NETDEV_RX_ERR,
 
 	/* Keep last */
 	__TRIGGER_NETDEV_MAX,
@@ -635,6 +641,12 @@ void ledtrig_torch_ctrl(bool on);
 #else
 static inline void ledtrig_flash_ctrl(bool on) {}
 static inline void ledtrig_torch_ctrl(bool on) {}
+#endif
+
+#if IS_REACHABLE(CONFIG_LEDS_TRIGGER_BACKLIGHT)
+void ledtrig_backlight_blank(bool blank);
+#else
+static inline void ledtrig_backlight_blank(bool blank) {}
 #endif
 
 /*
@@ -668,8 +680,10 @@ typedef int (*gpio_blink_set_t)(struct gpio_desc *desc, int state,
 struct gpio_led {
 	const char *name;
 	const char *default_trigger;
+#ifdef CONFIG_GPIOLIB_LEGACY
 	unsigned 	gpio;
 	unsigned	active_low : 1;
+#endif
 	unsigned	retain_state_suspended : 1;
 	unsigned	panic_indicator : 1;
 	unsigned	default_state : 2;

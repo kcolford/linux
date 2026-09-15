@@ -27,7 +27,6 @@
 #include <linux/memblock.h>
 #include <linux/dma-mapping.h>
 #include <linux/of_address.h>
-#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/gpio/consumer.h>
 #include <linux/clk.h>
@@ -631,7 +630,7 @@ static int cpm_uart_verify_port(struct uart_port *port,
 
 	if (ser->type != PORT_UNKNOWN && ser->type != PORT_CPM)
 		ret = -EINVAL;
-	if (ser->irq < 0 || ser->irq >= nr_irqs)
+	if (ser->irq < 0 || ser->irq >= irq_get_nr_irqs())
 		ret = -EINVAL;
 	if (ser->baud_base < 9600)
 		ret = -EINVAL;
@@ -1530,15 +1529,13 @@ static int cpm_uart_probe(struct platform_device *ofdev)
 	/* initialize the device pointer for the port */
 	pinfo->port.dev = &ofdev->dev;
 
-	pinfo->port.irq = irq_of_parse_and_map(ofdev->dev.of_node, 0);
-	if (!pinfo->port.irq)
-		return -EINVAL;
+	pinfo->port.irq = platform_get_irq(ofdev, 0);
+	if (pinfo->port.irq < 0)
+		return pinfo->port.irq;
 
 	ret = cpm_uart_init_port(ofdev->dev.of_node, pinfo);
 	if (!ret)
 		return uart_add_one_port(&cpm_reg, &pinfo->port);
-
-	irq_dispose_mapping(pinfo->port.irq);
 
 	return ret;
 }
@@ -1573,7 +1570,7 @@ static struct platform_driver cpm_uart_driver = {
 		.of_match_table = cpm_uart_match,
 	},
 	.probe = cpm_uart_probe,
-	.remove_new = cpm_uart_remove,
+	.remove = cpm_uart_remove,
  };
 
 static int __init cpm_uart_init(void)

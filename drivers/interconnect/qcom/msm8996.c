@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/interconnect-provider.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -552,6 +551,7 @@ static struct qcom_icc_node mas_venus_vmem = {
 static const u16 mas_snoc_pnoc_links[] = {
 	MSM8996_SLAVE_BLSP_1,
 	MSM8996_SLAVE_BLSP_2,
+	MSM8996_SLAVE_USB_HS,
 	MSM8996_SLAVE_SDCC_1,
 	MSM8996_SLAVE_SDCC_2,
 	MSM8996_SLAVE_SDCC_4,
@@ -2108,7 +2108,7 @@ MODULE_DEVICE_TABLE(of, qnoc_of_match);
 
 static struct platform_driver qnoc_driver = {
 	.probe = qnoc_probe,
-	.remove_new = qnoc_remove,
+	.remove = qnoc_remove,
 	.driver = {
 		.name = "qnoc-msm8996",
 		.of_match_table = qnoc_of_match,

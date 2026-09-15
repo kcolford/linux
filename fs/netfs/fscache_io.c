@@ -9,7 +9,6 @@
 #include <linux/uio.h>
 #include <linux/bvec.h>
 #include <linux/slab.h>
-#include <linux/uio.h>
 #include "internal.h"
 
 /**
@@ -28,12 +27,12 @@ bool fscache_wait_for_operation(struct netfs_cache_resources *cres,
 
 again:
 	if (!fscache_cache_is_live(cookie->volume->cache)) {
-		kleave(" [broken]");
+		_leave(" [broken]");
 		return false;
 	}
 
 	state = fscache_cookie_state(cookie);
-	kenter("c=%08x{%u},%x", cookie->debug_id, state, want_state);
+	_enter("c=%08x{%u},%x", cookie->debug_id, state, want_state);
 
 	switch (state) {
 	case FSCACHE_COOKIE_STATE_CREATING:
@@ -52,7 +51,7 @@ again:
 	case FSCACHE_COOKIE_STATE_DROPPED:
 	case FSCACHE_COOKIE_STATE_RELINQUISHING:
 	default:
-		kleave(" [not live]");
+		_leave(" [not live]");
 		return false;
 	}
 
@@ -92,7 +91,7 @@ again:
 	spin_lock(&cookie->lock);
 
 	state = fscache_cookie_state(cookie);
-	kenter("c=%08x{%u},%x", cookie->debug_id, state, want_state);
+	_enter("c=%08x{%u},%x", cookie->debug_id, state, want_state);
 
 	switch (state) {
 	case FSCACHE_COOKIE_STATE_LOOKING_UP:
@@ -140,7 +139,7 @@ failed:
 	cres->cache_priv = NULL;
 	cres->ops = NULL;
 	fscache_end_cookie_access(cookie, fscache_access_io_not_live);
-	kleave(" = -ENOBUFS");
+	_leave(" = -ENOBUFS");
 	return -ENOBUFS;
 }
 
@@ -193,8 +192,7 @@ EXPORT_SYMBOL(__fscache_clear_page_bits);
 /*
  * Deal with the completion of writing the data to the cache.
  */
-static void fscache_wreq_done(void *priv, ssize_t transferred_or_error,
-			      bool was_async)
+static void fscache_wreq_done(void *priv, ssize_t transferred_or_error)
 {
 	struct fscache_write_request *wreq = priv;
 
@@ -203,8 +201,7 @@ static void fscache_wreq_done(void *priv, ssize_t transferred_or_error,
 					wreq->set_bits);
 
 	if (wreq->term_func)
-		wreq->term_func(wreq->term_func_priv, transferred_or_error,
-				was_async);
+		wreq->term_func(wreq->term_func_priv, transferred_or_error);
 	fscache_end_operation(&wreq->cache_resources);
 	kfree(wreq);
 }
@@ -224,9 +221,9 @@ void __fscache_write_to_cache(struct fscache_cookie *cookie,
 	if (len == 0)
 		goto abandon;
 
-	kenter("%llx,%zx", start, len);
+	_enter("%llx,%zx", start, len);
 
-	wreq = kzalloc(sizeof(struct fscache_write_request), GFP_NOFS);
+	wreq = kzalloc_obj(struct fscache_write_request, GFP_NOFS);
 	if (!wreq)
 		goto abandon;
 	wreq->mapping		= mapping;
@@ -256,14 +253,14 @@ void __fscache_write_to_cache(struct fscache_cookie *cookie,
 	return;
 
 abandon_end:
-	return fscache_wreq_done(wreq, ret, false);
+	return fscache_wreq_done(wreq, ret);
 abandon_free:
 	kfree(wreq);
 abandon:
 	if (using_pgpriv2)
 		fscache_clear_page_bits(mapping, start, len, cond);
 	if (term_func)
-		term_func(term_func_priv, ret, false);
+		term_func(term_func_priv, ret);
 }
 EXPORT_SYMBOL(__fscache_write_to_cache);
 

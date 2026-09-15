@@ -364,7 +364,7 @@ void precompute_pq(void)
 /* one-time pre-compute dePQ values - only for max pixel value 125 FP16 */
 void precompute_de_pq(void)
 {
-	int i;
+	uint32_t i;
 	struct fixed31_32  y;
 	uint32_t begin_index, end_index;
 
@@ -690,7 +690,7 @@ static bool find_software_points(
 static bool build_custom_gamma_mapping_coefficients_worker(
 	const struct dc_gamma *ramp,
 	struct pixel_gamma_point *coeff,
-	const struct hw_x_point *coordinates_x,
+	const struct hw_x_point *hw_coordinates_x,
 	const struct gamma_pixel *axis_x,
 	enum channel_name channel,
 	uint32_t number_of_points)
@@ -712,11 +712,11 @@ static bool build_custom_gamma_mapping_coefficients_worker(
 		struct fixed31_32 right_pos;
 
 		if (channel == CHANNEL_NAME_RED)
-			coord_x = coordinates_x[i].regamma_y_red;
+			coord_x = hw_coordinates_x[i].regamma_y_red;
 		else if (channel == CHANNEL_NAME_GREEN)
-			coord_x = coordinates_x[i].regamma_y_green;
+			coord_x = hw_coordinates_x[i].regamma_y_green;
 		else
-			coord_x = coordinates_x[i].regamma_y_blue;
+			coord_x = hw_coordinates_x[i].regamma_y_blue;
 
 		if (!find_software_points(
 			ramp, axis_x, coord_x, channel,
@@ -783,7 +783,7 @@ static struct fixed31_32 calculate_mapped_value(
 	struct pwl_float_data *rgb,
 	const struct pixel_gamma_point *coeff,
 	enum channel_name channel,
-	uint32_t max_index)
+	int32_t max_index)
 {
 	const struct gamma_point *point;
 
@@ -896,6 +896,7 @@ static void build_de_pq(struct pwl_float_data_ex *de_pq,
 		uint32_t hw_points_num,
 		const struct hw_x_point *coordinate_x)
 {
+	(void)coordinate_x;
 	uint32_t i;
 	struct fixed31_32 output;
 	struct fixed31_32 *de_pq_table = mod_color_get_table(type_de_pq_table);
@@ -933,7 +934,7 @@ static bool build_regamma(struct pwl_float_data_ex *rgb_regamma,
 	struct pwl_float_data_ex *rgb = rgb_regamma;
 	const struct hw_x_point *coord_x = coordinate_x;
 
-	coeff = kvzalloc(sizeof(*coeff), GFP_KERNEL);
+	coeff = kvzalloc_obj(*coeff);
 	if (!coeff)
 		goto release;
 
@@ -1339,6 +1340,7 @@ static void scale_gamma_dx(struct pwl_float_data *pwl_rgb,
 		const struct dc_gamma *ramp,
 		struct dividers dividers)
 {
+	(void)dividers;
 	uint32_t i;
 	struct fixed31_32 min = dc_fixpt_zero;
 	struct fixed31_32 max = dc_fixpt_one;
@@ -1399,71 +1401,6 @@ static void scale_gamma_dx(struct pwl_float_data *pwl_rgb,
 				pwl_rgb[i-1].b, 2), pwl_rgb[i-2].b);
 }
 
-/* todo: all these scale_gamma functions are inherently the same but
- *  take different structures as params or different format for ramp
- *  values. We could probably implement it in a more generic fashion
- */
-static void scale_user_regamma_ramp(struct pwl_float_data *pwl_rgb,
-		const struct regamma_ramp *ramp,
-		struct dividers dividers)
-{
-	unsigned short max_driver = 0xFFFF;
-	unsigned short max_os = 0xFF00;
-	unsigned short scaler = max_os;
-	uint32_t i;
-	struct pwl_float_data *rgb = pwl_rgb;
-	struct pwl_float_data *rgb_last = rgb + GAMMA_RGB_256_ENTRIES - 1;
-
-	i = 0;
-	do {
-		if (ramp->gamma[i] > max_os ||
-				ramp->gamma[i + 256] > max_os ||
-				ramp->gamma[i + 512] > max_os) {
-			scaler = max_driver;
-			break;
-		}
-		i++;
-	} while (i != GAMMA_RGB_256_ENTRIES);
-
-	i = 0;
-	do {
-		rgb->r = dc_fixpt_from_fraction(
-				ramp->gamma[i], scaler);
-		rgb->g = dc_fixpt_from_fraction(
-				ramp->gamma[i + 256], scaler);
-		rgb->b = dc_fixpt_from_fraction(
-				ramp->gamma[i + 512], scaler);
-
-		++rgb;
-		++i;
-	} while (i != GAMMA_RGB_256_ENTRIES);
-
-	rgb->r = dc_fixpt_mul(rgb_last->r,
-			dividers.divider1);
-	rgb->g = dc_fixpt_mul(rgb_last->g,
-			dividers.divider1);
-	rgb->b = dc_fixpt_mul(rgb_last->b,
-			dividers.divider1);
-
-	++rgb;
-
-	rgb->r = dc_fixpt_mul(rgb_last->r,
-			dividers.divider2);
-	rgb->g = dc_fixpt_mul(rgb_last->g,
-			dividers.divider2);
-	rgb->b = dc_fixpt_mul(rgb_last->b,
-			dividers.divider2);
-
-	++rgb;
-
-	rgb->r = dc_fixpt_mul(rgb_last->r,
-			dividers.divider3);
-	rgb->g = dc_fixpt_mul(rgb_last->g,
-			dividers.divider3);
-	rgb->b = dc_fixpt_mul(rgb_last->b,
-			dividers.divider3);
-}
-
 /*
  * RS3+ color transform DDI - 1D LUT adjustment is composed with regamma here
  * Input is evenly distributed in the output color space as specified in
@@ -1488,7 +1425,7 @@ static void apply_lut_1d(
 		uint32_t num_hw_points,
 		struct dc_transfer_func_distributed_points *tf_pts)
 {
-	int i = 0;
+	uint32_t i = 0;
 	int color = 0;
 	struct fixed31_32 *regamma_y;
 	struct fixed31_32 norm_y;
@@ -1602,11 +1539,11 @@ static void build_evenly_distributed_points(
 }
 
 static inline void copy_rgb_regamma_to_coordinates_x(
-		struct hw_x_point *coordinates_x,
+		struct hw_x_point *hw_coordinates_x,
 		uint32_t hw_points_num,
 		const struct pwl_float_data_ex *rgb_ex)
 {
-	struct hw_x_point *coords = coordinates_x;
+	struct hw_x_point *coords = hw_coordinates_x;
 	uint32_t i = 0;
 	const struct pwl_float_data_ex *rgb_regamma = rgb_ex;
 
@@ -1625,26 +1562,26 @@ static bool calculate_interpolated_hardware_curve(
 	const struct dc_gamma *ramp,
 	struct pixel_gamma_point *coeff128,
 	struct pwl_float_data *rgb_user,
-	const struct hw_x_point *coordinates_x,
+	const struct hw_x_point *hw_coordinates_x,
 	const struct gamma_pixel *axis_x,
 	uint32_t number_of_points,
 	struct dc_transfer_func_distributed_points *tf_pts)
 {
 
 	const struct pixel_gamma_point *coeff = coeff128;
-	uint32_t max_entries = 3 - 1;
+	int32_t max_entries = 3 - 1;
 
 	uint32_t i = 0;
 
 	for (i = 0; i < 3; i++) {
 		if (!build_custom_gamma_mapping_coefficients_worker(
-				ramp, coeff128, coordinates_x, axis_x, i,
+				ramp, coeff128, hw_coordinates_x, axis_x, i,
 				number_of_points))
 			return false;
 	}
 
 	i = 0;
-	max_entries += ramp->num_entries;
+	max_entries += (int32_t)ramp->num_entries;
 
 	/* TODO: float point case */
 
@@ -1661,106 +1598,6 @@ static bool calculate_interpolated_hardware_curve(
 	}
 
 	return true;
-}
-
-/* The "old" interpolation uses a complicated scheme to build an array of
- * coefficients while also using an array of 0-255 normalized to 0-1
- * Then there's another loop using both of the above + new scaled user ramp
- * and we concatenate them. It also searches for points of interpolation and
- * uses enums for positions.
- *
- * This function uses a different approach:
- * user ramp is always applied on X with 0/255, 1/255, 2/255, ..., 255/255
- * To find index for hwX , we notice the following:
- * i/255 <= hwX < (i+1)/255  <=> i <= 255*hwX < i+1
- * See apply_lut_1d which is the same principle, but on 4K entry 1D LUT
- *
- * Once the index is known, combined Y is simply:
- * user_ramp(index) + (hwX-index/255)*(user_ramp(index+1) - user_ramp(index)
- *
- * We should switch to this method in all cases, it's simpler and faster
- * ToDo one day - for now this only applies to ADL regamma to avoid regression
- * for regular use cases (sRGB and PQ)
- */
-static void interpolate_user_regamma(uint32_t hw_points_num,
-		struct pwl_float_data *rgb_user,
-		bool apply_degamma,
-		struct dc_transfer_func_distributed_points *tf_pts)
-{
-	uint32_t i;
-	uint32_t color = 0;
-	int32_t index;
-	int32_t index_next;
-	struct fixed31_32 *tf_point;
-	struct fixed31_32 hw_x;
-	struct fixed31_32 norm_factor =
-			dc_fixpt_from_int(255);
-	struct fixed31_32 norm_x;
-	struct fixed31_32 index_f;
-	struct fixed31_32 lut1;
-	struct fixed31_32 lut2;
-	struct fixed31_32 delta_lut;
-	struct fixed31_32 delta_index;
-	const struct fixed31_32 one = dc_fixpt_from_int(1);
-
-	i = 0;
-	/* fixed_pt library has problems handling too small values */
-	while (i != 32) {
-		tf_pts->red[i] = dc_fixpt_zero;
-		tf_pts->green[i] = dc_fixpt_zero;
-		tf_pts->blue[i] = dc_fixpt_zero;
-		++i;
-	}
-	while (i <= hw_points_num + 1) {
-		for (color = 0; color < 3; color++) {
-			if (color == 0)
-				tf_point = &tf_pts->red[i];
-			else if (color == 1)
-				tf_point = &tf_pts->green[i];
-			else
-				tf_point = &tf_pts->blue[i];
-
-			if (apply_degamma) {
-				if (color == 0)
-					hw_x = coordinates_x[i].regamma_y_red;
-				else if (color == 1)
-					hw_x = coordinates_x[i].regamma_y_green;
-				else
-					hw_x = coordinates_x[i].regamma_y_blue;
-			} else
-				hw_x = coordinates_x[i].x;
-
-			if (dc_fixpt_le(one, hw_x))
-				hw_x = one;
-
-			norm_x = dc_fixpt_mul(norm_factor, hw_x);
-			index = dc_fixpt_floor(norm_x);
-			if (index < 0 || index > 255)
-				continue;
-
-			index_f = dc_fixpt_from_int(index);
-			index_next = (index == 255) ? index : index + 1;
-
-			if (color == 0) {
-				lut1 = rgb_user[index].r;
-				lut2 = rgb_user[index_next].r;
-			} else if (color == 1) {
-				lut1 = rgb_user[index].g;
-				lut2 = rgb_user[index_next].g;
-			} else {
-				lut1 = rgb_user[index].b;
-				lut2 = rgb_user[index_next].b;
-			}
-
-			// we have everything now, so interpolate
-			delta_lut = dc_fixpt_sub(lut2, lut1);
-			delta_index = dc_fixpt_sub(norm_x, index_f);
-
-			*tf_point = dc_fixpt_add(lut1,
-				dc_fixpt_mul(delta_index, delta_lut));
-		}
-		++i;
-	}
 }
 
 static void build_new_custom_resulted_curve(
@@ -1784,29 +1621,6 @@ static void build_new_custom_resulted_curve(
 	}
 }
 
-static void apply_degamma_for_user_regamma(struct pwl_float_data_ex *rgb_regamma,
-		uint32_t hw_points_num, struct calculate_buffer *cal_buffer)
-{
-	uint32_t i;
-
-	struct gamma_coefficients coeff;
-	struct pwl_float_data_ex *rgb = rgb_regamma;
-	const struct hw_x_point *coord_x = coordinates_x;
-
-	build_coefficients(&coeff, TRANSFER_FUNCTION_SRGB);
-
-	i = 0;
-	while (i != hw_points_num + 1) {
-		rgb->r = translate_from_linear_space_ex(
-				coord_x->x, &coeff, 0, cal_buffer);
-		rgb->g = rgb->r;
-		rgb->b = rgb->r;
-		++coord_x;
-		++rgb;
-		++i;
-	}
-}
-
 static bool map_regamma_hw_to_x_user(
 	const struct dc_gamma *ramp,
 	struct pixel_gamma_point *coeff128,
@@ -1821,7 +1635,7 @@ static bool map_regamma_hw_to_x_user(
 {
 	/* setup to spare calculated ideal regamma values */
 
-	int i = 0;
+	uint32_t i = 0;
 	struct hw_x_point *coords = coords_x;
 	const struct pwl_float_data_ex *regamma = rgb_regamma;
 
@@ -1854,125 +1668,6 @@ static bool map_regamma_hw_to_x_user(
 }
 
 #define _EXTRA_POINTS 3
-
-bool calculate_user_regamma_coeff(struct dc_transfer_func *output_tf,
-		const struct regamma_lut *regamma,
-		struct calculate_buffer *cal_buffer,
-		const struct dc_gamma *ramp)
-{
-	struct gamma_coefficients coeff;
-	const struct hw_x_point *coord_x = coordinates_x;
-	uint32_t i = 0;
-
-	do {
-		coeff.a0[i] = dc_fixpt_from_fraction(
-				regamma->coeff.A0[i], 10000000);
-		coeff.a1[i] = dc_fixpt_from_fraction(
-				regamma->coeff.A1[i], 1000);
-		coeff.a2[i] = dc_fixpt_from_fraction(
-				regamma->coeff.A2[i], 1000);
-		coeff.a3[i] = dc_fixpt_from_fraction(
-				regamma->coeff.A3[i], 1000);
-		coeff.user_gamma[i] = dc_fixpt_from_fraction(
-				regamma->coeff.gamma[i], 1000);
-
-		++i;
-	} while (i != 3);
-
-	i = 0;
-	/* fixed_pt library has problems handling too small values */
-	while (i != 32) {
-		output_tf->tf_pts.red[i] = dc_fixpt_zero;
-		output_tf->tf_pts.green[i] = dc_fixpt_zero;
-		output_tf->tf_pts.blue[i] = dc_fixpt_zero;
-		++coord_x;
-		++i;
-	}
-	while (i != MAX_HW_POINTS + 1) {
-		output_tf->tf_pts.red[i] = translate_from_linear_space_ex(
-				coord_x->x, &coeff, 0, cal_buffer);
-		output_tf->tf_pts.green[i] = translate_from_linear_space_ex(
-				coord_x->x, &coeff, 1, cal_buffer);
-		output_tf->tf_pts.blue[i] = translate_from_linear_space_ex(
-				coord_x->x, &coeff, 2, cal_buffer);
-		++coord_x;
-		++i;
-	}
-
-	if (ramp && ramp->type == GAMMA_CS_TFM_1D)
-		apply_lut_1d(ramp, MAX_HW_POINTS, &output_tf->tf_pts);
-
-	// this function just clamps output to 0-1
-	build_new_custom_resulted_curve(MAX_HW_POINTS, &output_tf->tf_pts);
-	output_tf->type = TF_TYPE_DISTRIBUTED_POINTS;
-
-	return true;
-}
-
-bool calculate_user_regamma_ramp(struct dc_transfer_func *output_tf,
-		const struct regamma_lut *regamma,
-		struct calculate_buffer *cal_buffer,
-		const struct dc_gamma *ramp)
-{
-	struct dc_transfer_func_distributed_points *tf_pts = &output_tf->tf_pts;
-	struct dividers dividers;
-
-	struct pwl_float_data *rgb_user = NULL;
-	struct pwl_float_data_ex *rgb_regamma = NULL;
-	bool ret = false;
-
-	if (regamma == NULL)
-		return false;
-
-	output_tf->type = TF_TYPE_DISTRIBUTED_POINTS;
-
-	rgb_user = kcalloc(GAMMA_RGB_256_ENTRIES + _EXTRA_POINTS,
-			   sizeof(*rgb_user),
-			   GFP_KERNEL);
-	if (!rgb_user)
-		goto rgb_user_alloc_fail;
-
-	rgb_regamma = kcalloc(MAX_HW_POINTS + _EXTRA_POINTS,
-			      sizeof(*rgb_regamma),
-			      GFP_KERNEL);
-	if (!rgb_regamma)
-		goto rgb_regamma_alloc_fail;
-
-	dividers.divider1 = dc_fixpt_from_fraction(3, 2);
-	dividers.divider2 = dc_fixpt_from_int(2);
-	dividers.divider3 = dc_fixpt_from_fraction(5, 2);
-
-	scale_user_regamma_ramp(rgb_user, &regamma->ramp, dividers);
-
-	if (regamma->flags.bits.applyDegamma == 1) {
-		apply_degamma_for_user_regamma(rgb_regamma, MAX_HW_POINTS, cal_buffer);
-		copy_rgb_regamma_to_coordinates_x(coordinates_x,
-				MAX_HW_POINTS, rgb_regamma);
-	}
-
-	interpolate_user_regamma(MAX_HW_POINTS, rgb_user,
-			regamma->flags.bits.applyDegamma, tf_pts);
-
-	// no custom HDR curves!
-	tf_pts->end_exponent = 0;
-	tf_pts->x_point_at_y1_red = 1;
-	tf_pts->x_point_at_y1_green = 1;
-	tf_pts->x_point_at_y1_blue = 1;
-
-	if (ramp && ramp->type == GAMMA_CS_TFM_1D)
-		apply_lut_1d(ramp, MAX_HW_POINTS, &output_tf->tf_pts);
-
-	// this function just clamps output to 0-1
-	build_new_custom_resulted_curve(MAX_HW_POINTS, tf_pts);
-
-	ret = true;
-
-	kfree(rgb_regamma);
-rgb_regamma_alloc_fail:
-	kfree(rgb_user);
-rgb_user_alloc_fail:
-	return ret;
-}
 
 bool mod_color_calculate_degamma_params(struct dc_color_caps *dc_caps,
 		struct dc_transfer_func *input_tf,
@@ -2021,14 +1716,13 @@ bool mod_color_calculate_degamma_params(struct dc_color_caps *dc_caps,
 	input_tf->type = TF_TYPE_DISTRIBUTED_POINTS;
 
 	if (map_user_ramp && ramp && ramp->type == GAMMA_RGB_256) {
-		rgb_user = kvcalloc(ramp->num_entries + _EXTRA_POINTS,
-				sizeof(*rgb_user),
-				GFP_KERNEL);
+		rgb_user = kvzalloc_objs(*rgb_user,
+					 ramp->num_entries + _EXTRA_POINTS);
 		if (!rgb_user)
 			goto rgb_user_alloc_fail;
 
-		axis_x = kvcalloc(ramp->num_entries + _EXTRA_POINTS, sizeof(*axis_x),
-				GFP_KERNEL);
+		axis_x = kvzalloc_objs(*axis_x,
+				       ramp->num_entries + _EXTRA_POINTS);
 		if (!axis_x)
 			goto axis_x_alloc_fail;
 
@@ -2044,13 +1738,11 @@ bool mod_color_calculate_degamma_params(struct dc_color_caps *dc_caps,
 		scale_gamma(rgb_user, ramp, dividers);
 	}
 
-	curve = kvcalloc(MAX_HW_POINTS + _EXTRA_POINTS, sizeof(*curve),
-			GFP_KERNEL);
+	curve = kvzalloc_objs(*curve, MAX_HW_POINTS + _EXTRA_POINTS);
 	if (!curve)
 		goto curve_alloc_fail;
 
-	coeff = kvcalloc(MAX_HW_POINTS + _EXTRA_POINTS, sizeof(*coeff),
-			GFP_KERNEL);
+	coeff = kvzalloc_objs(*coeff, MAX_HW_POINTS + _EXTRA_POINTS);
 	if (!coeff)
 		goto coeff_alloc_fail;
 
@@ -2094,14 +1786,14 @@ bool mod_color_calculate_degamma_params(struct dc_color_caps *dc_caps,
 	if (input_tf->tf == TRANSFER_FUNCTION_PQ) {
 		/* just copy current rgb_regamma into  tf_pts */
 		struct pwl_float_data_ex *curvePt = curve;
-		int i = 0;
+		int j = 0;
 
-		while (i <= MAX_HW_POINTS) {
-			tf_pts->red[i]   = curvePt->r;
-			tf_pts->green[i] = curvePt->g;
-			tf_pts->blue[i]  = curvePt->b;
+		while (j <= MAX_HW_POINTS) {
+			tf_pts->red[j]   = curvePt->r;
+			tf_pts->green[j] = curvePt->g;
+			tf_pts->blue[j]  = curvePt->b;
 			++curvePt;
-			++i;
+			++j;
 		}
 	} else {
 		// clamps to 0-1
@@ -2247,14 +1939,12 @@ bool mod_color_calculate_regamma_params(struct dc_transfer_func *output_tf,
 
 	if (ramp && ramp->type != GAMMA_CS_TFM_1D &&
 	    (map_user_ramp || ramp->type != GAMMA_RGB_256)) {
-		rgb_user = kvcalloc(ramp->num_entries + _EXTRA_POINTS,
-			    sizeof(*rgb_user),
-			    GFP_KERNEL);
+		rgb_user = kvzalloc_objs(*rgb_user,
+					 ramp->num_entries + _EXTRA_POINTS);
 		if (!rgb_user)
 			goto rgb_user_alloc_fail;
 
-		axis_x = kvcalloc(ramp->num_entries + 3, sizeof(*axis_x),
-				GFP_KERNEL);
+		axis_x = kvzalloc_objs(*axis_x, ramp->num_entries + 3);
 		if (!axis_x)
 			goto axis_x_alloc_fail;
 
@@ -2273,14 +1963,11 @@ bool mod_color_calculate_regamma_params(struct dc_transfer_func *output_tf,
 			scale_gamma_dx(rgb_user, ramp, dividers);
 	}
 
-	rgb_regamma = kvcalloc(MAX_HW_POINTS + _EXTRA_POINTS,
-			       sizeof(*rgb_regamma),
-			       GFP_KERNEL);
+	rgb_regamma = kvzalloc_objs(*rgb_regamma, MAX_HW_POINTS + _EXTRA_POINTS);
 	if (!rgb_regamma)
 		goto rgb_regamma_alloc_fail;
 
-	coeff = kvcalloc(MAX_HW_POINTS + _EXTRA_POINTS, sizeof(*coeff),
-			 GFP_KERNEL);
+	coeff = kvzalloc_objs(*coeff, MAX_HW_POINTS + _EXTRA_POINTS);
 	if (!coeff)
 		goto coeff_alloc_fail;
 

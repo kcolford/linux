@@ -17,10 +17,14 @@
 
 #include <drm/drm_auth.h>
 #include <drm/drm_managed.h>
+
+#include <linux/bug.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/list.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/xarray.h>
@@ -69,24 +73,12 @@ process_static_context_state(struct pvr_device *pvr_dev, const struct pvr_stream
 	void *stream;
 	int err;
 
-	stream = kzalloc(stream_size, GFP_KERNEL);
-	if (!stream)
-		return -ENOMEM;
-
-	if (copy_from_user(stream, u64_to_user_ptr(stream_user_ptr), stream_size)) {
-		err = -EFAULT;
-		goto err_free;
-	}
+	stream = memdup_user(u64_to_user_ptr(stream_user_ptr), stream_size);
+	if (IS_ERR(stream))
+		return PTR_ERR(stream);
 
 	err = pvr_stream_process(pvr_dev, cmd_defs, stream, stream_size, dest);
-	if (err)
-		goto err_free;
 
-	kfree(stream);
-
-	return 0;
-
-err_free:
 	kfree(stream);
 
 	return err;
@@ -169,22 +161,24 @@ ctx_fw_data_init(void *cpu_ptr, void *priv)
 /**
  * pvr_context_destroy_queues() - Destroy all queues attached to a context.
  * @ctx: Context to destroy queues on.
+ * @cleanup_queue_entity: Whether to cleanup the queue entity e.g. context
+ * creation failure path.
  *
  * Should be called when the last reference to a context object is dropped.
  * It releases all resources attached to the queues bound to this context.
  */
-static void pvr_context_destroy_queues(struct pvr_context *ctx)
+static void pvr_context_destroy_queues(struct pvr_context *ctx, bool cleanup_queue_entity)
 {
 	switch (ctx->type) {
 	case DRM_PVR_CTX_TYPE_RENDER:
-		pvr_queue_destroy(ctx->queues.fragment);
-		pvr_queue_destroy(ctx->queues.geometry);
+		pvr_queue_destroy(ctx->queues.fragment, cleanup_queue_entity);
+		pvr_queue_destroy(ctx->queues.geometry, cleanup_queue_entity);
 		break;
 	case DRM_PVR_CTX_TYPE_COMPUTE:
-		pvr_queue_destroy(ctx->queues.compute);
+		pvr_queue_destroy(ctx->queues.compute, cleanup_queue_entity);
 		break;
 	case DRM_PVR_CTX_TYPE_TRANSFER_FRAG:
-		pvr_queue_destroy(ctx->queues.transfer);
+		pvr_queue_destroy(ctx->queues.transfer, cleanup_queue_entity);
 		break;
 	}
 }
@@ -248,7 +242,7 @@ static int pvr_context_create_queues(struct pvr_context *ctx,
 	return -EINVAL;
 
 err_destroy_queues:
-	pvr_context_destroy_queues(ctx);
+	pvr_context_destroy_queues(ctx, true);
 	return err;
 }
 
@@ -300,7 +294,7 @@ int pvr_context_create(struct pvr_file *pvr_file, struct drm_pvr_ioctl_create_co
 	if (ctx_size < 0)
 		return ctx_size;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -315,8 +309,8 @@ int pvr_context_create(struct pvr_file *pvr_file, struct drm_pvr_ioctl_create_co
 		goto err_free_ctx;
 
 	ctx->vm_ctx = pvr_vm_context_lookup(pvr_file, args->vm_context_handle);
-	if (IS_ERR(ctx->vm_ctx)) {
-		err = PTR_ERR(ctx->vm_ctx);
+	if (!ctx->vm_ctx) {
+		err = -EINVAL;
 		goto err_free_ctx;
 	}
 
@@ -326,9 +320,13 @@ int pvr_context_create(struct pvr_file *pvr_file, struct drm_pvr_ioctl_create_co
 		goto err_put_vm;
 	}
 
-	err = pvr_context_create_queues(ctx, args, ctx->data);
+	err = xa_alloc(&pvr_dev->ctx_ids, &ctx->ctx_id, ctx, xa_limit_32b, GFP_KERNEL);
 	if (err)
 		goto err_free_ctx_data;
+
+	err = pvr_context_create_queues(ctx, args, ctx->data);
+	if (err)
+		goto err_free_ctx_id;
 
 	err = init_fw_objs(ctx, args, ctx->data);
 	if (err)
@@ -337,22 +335,15 @@ int pvr_context_create(struct pvr_file *pvr_file, struct drm_pvr_ioctl_create_co
 	err = pvr_fw_object_create(pvr_dev, ctx_size, PVR_BO_FW_FLAGS_DEVICE_UNCACHED,
 				   ctx_fw_data_init, ctx, &ctx->fw_obj);
 	if (err)
-		goto err_free_ctx_data;
+		goto err_destroy_queues;
 
-	err = xa_alloc(&pvr_dev->ctx_ids, &ctx->ctx_id, ctx, xa_limit_32b, GFP_KERNEL);
+	err = xa_alloc(&pvr_file->ctx_handles, &args->handle, ctx, xa_limit_32b, GFP_KERNEL);
 	if (err)
 		goto err_destroy_fw_obj;
 
-	err = xa_alloc(&pvr_file->ctx_handles, &args->handle, ctx, xa_limit_32b, GFP_KERNEL);
-	if (err) {
-		/*
-		 * It's possible that another thread could have taken a reference on the context at
-		 * this point as it is in the ctx_ids xarray. Therefore instead of directly
-		 * destroying the context, drop a reference instead.
-		 */
-		pvr_context_put(ctx);
-		return err;
-	}
+	spin_lock(&pvr_dev->ctx_list_lock);
+	list_add_tail(&ctx->file_link, &pvr_file->contexts);
+	spin_unlock(&pvr_dev->ctx_list_lock);
 
 	return 0;
 
@@ -360,7 +351,16 @@ err_destroy_fw_obj:
 	pvr_fw_object_destroy(ctx->fw_obj);
 
 err_destroy_queues:
-	pvr_context_destroy_queues(ctx);
+	pvr_context_destroy_queues(ctx, true);
+
+err_free_ctx_id:
+	/*
+	 * Ctx_id is not exposed to userspace and not visible yet within
+	 * the kernel/FW, plus a matching context handle (exposed to userspace)
+	 * hasn't been allocated yet, so it is safe to remove ctx_id
+	 * from the ctx_ids xarray.
+	 */
+	xa_erase(&pvr_dev->ctx_ids, ctx->ctx_id);
 
 err_free_ctx_data:
 	kfree(ctx->data);
@@ -380,8 +380,13 @@ pvr_context_release(struct kref *ref_count)
 		container_of(ref_count, struct pvr_context, ref_count);
 	struct pvr_device *pvr_dev = ctx->pvr_dev;
 
+	WARN_ON(in_interrupt());
+	spin_lock(&pvr_dev->ctx_list_lock);
+	list_del(&ctx->file_link);
+	spin_unlock(&pvr_dev->ctx_list_lock);
+
 	xa_erase(&pvr_dev->ctx_ids, ctx->ctx_id);
-	pvr_context_destroy_queues(ctx);
+	pvr_context_destroy_queues(ctx, false);
 	pvr_fw_object_destroy(ctx->fw_obj);
 	kfree(ctx->data);
 	pvr_vm_context_put(ctx->vm_ctx);
@@ -437,11 +442,30 @@ pvr_context_destroy(struct pvr_file *pvr_file, u32 handle)
  */
 void pvr_destroy_contexts_for_file(struct pvr_file *pvr_file)
 {
+	struct pvr_device *pvr_dev = pvr_file->pvr_dev;
 	struct pvr_context *ctx;
 	unsigned long handle;
 
 	xa_for_each(&pvr_file->ctx_handles, handle, ctx)
 		pvr_context_destroy(pvr_file, handle);
+
+	spin_lock(&pvr_dev->ctx_list_lock);
+	ctx = list_first_entry(&pvr_file->contexts, struct pvr_context, file_link);
+
+	while (!list_entry_is_head(ctx, &pvr_file->contexts, file_link)) {
+		list_del_init(&ctx->file_link);
+
+		if (pvr_context_get_if_referenced(ctx)) {
+			spin_unlock(&pvr_dev->ctx_list_lock);
+
+			pvr_vm_unmap_all(ctx->vm_ctx);
+
+			pvr_context_put(ctx);
+			spin_lock(&pvr_dev->ctx_list_lock);
+		}
+		ctx = list_first_entry(&pvr_file->contexts, struct pvr_context, file_link);
+	}
+	spin_unlock(&pvr_dev->ctx_list_lock);
 }
 
 /**
@@ -451,6 +475,7 @@ void pvr_destroy_contexts_for_file(struct pvr_file *pvr_file)
 void pvr_context_device_init(struct pvr_device *pvr_dev)
 {
 	xa_init_flags(&pvr_dev->ctx_ids, XA_FLAGS_ALLOC1);
+	spin_lock_init(&pvr_dev->ctx_list_lock);
 }
 
 /**

@@ -17,18 +17,17 @@
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
 #include <asm/page.h>
-#include <asm/code-patching.h>
+#include <asm/text-patching.h>
 #include <asm/inst.h>
 
-static int __patch_instruction(u32 *exec_addr, ppc_inst_t instr, u32 *patch_addr)
+static int __patch_mem(void *exec_addr, unsigned long val, void *patch_addr, bool is_dword)
 {
-	if (!ppc_inst_prefixed(instr)) {
-		u32 val = ppc_inst_val(instr);
+	if (!IS_ENABLED(CONFIG_PPC64) || likely(!is_dword)) {
+		/* For big endian correctness: plain address would use the wrong half */
+		u32 val32 = val;
 
-		__put_kernel_nofault(patch_addr, &val, u32, failed);
+		__put_kernel_nofault(patch_addr, &val32, u32, failed);
 	} else {
-		u64 val = ppc_inst_as_ulong(instr);
-
 		__put_kernel_nofault(patch_addr, &val, u64, failed);
 	}
 
@@ -44,7 +43,10 @@ failed:
 
 int raw_patch_instruction(u32 *addr, ppc_inst_t instr)
 {
-	return __patch_instruction(addr, instr, addr);
+	if (ppc_inst_prefixed(instr))
+		return __patch_mem(addr, ppc_inst_as_ulong(instr), addr, true);
+	else
+		return __patch_mem(addr, ppc_inst_val(instr), addr, false);
 }
 
 struct patch_context {
@@ -57,9 +59,6 @@ struct patch_context {
 };
 
 static DEFINE_PER_CPU(struct patch_context, cpu_patching_context);
-
-static int map_patch_area(void *addr, unsigned long text_poke_addr);
-static void unmap_patch_area(unsigned long addr);
 
 static bool mm_patch_enabled(void)
 {
@@ -106,7 +105,7 @@ static int text_area_cpu_up(unsigned int cpu)
 	unsigned long addr;
 	int err;
 
-	area = get_vm_area(PAGE_SIZE, VM_ALLOC);
+	area = get_vm_area(PAGE_SIZE, 0);
 	if (!area) {
 		WARN_ONCE(1, "Failed to create text area for cpu %d\n",
 			cpu);
@@ -115,11 +114,11 @@ static int text_area_cpu_up(unsigned int cpu)
 
 	// Map/unmap the area to ensure all page tables are pre-allocated
 	addr = (unsigned long)area->addr;
-	err = map_patch_area(empty_zero_page, addr);
+	err = map_kernel_page(addr, __pa_symbol(empty_zero_page), PAGE_KERNEL_RO);
 	if (err)
 		return err;
 
-	unmap_patch_area(addr);
+	unmap_kernel_page(addr);
 
 	this_cpu_write(cpu_patching_context.area, area);
 	this_cpu_write(cpu_patching_context.addr, addr);
@@ -231,52 +230,7 @@ static unsigned long get_patch_pfn(void *addr)
 		return __pa_symbol(addr) >> PAGE_SHIFT;
 }
 
-/*
- * This can be called for kernel text or a module.
- */
-static int map_patch_area(void *addr, unsigned long text_poke_addr)
-{
-	unsigned long pfn = get_patch_pfn(addr);
-
-	return map_kernel_page(text_poke_addr, (pfn << PAGE_SHIFT), PAGE_KERNEL);
-}
-
-static void unmap_patch_area(unsigned long addr)
-{
-	pte_t *ptep;
-	pmd_t *pmdp;
-	pud_t *pudp;
-	p4d_t *p4dp;
-	pgd_t *pgdp;
-
-	pgdp = pgd_offset_k(addr);
-	if (WARN_ON(pgd_none(*pgdp)))
-		return;
-
-	p4dp = p4d_offset(pgdp, addr);
-	if (WARN_ON(p4d_none(*p4dp)))
-		return;
-
-	pudp = pud_offset(p4dp, addr);
-	if (WARN_ON(pud_none(*pudp)))
-		return;
-
-	pmdp = pmd_offset(pudp, addr);
-	if (WARN_ON(pmd_none(*pmdp)))
-		return;
-
-	ptep = pte_offset_kernel(pmdp, addr);
-	if (WARN_ON(pte_none(*ptep)))
-		return;
-
-	/*
-	 * In hash, pte_clear flushes the tlb, in radix, we have to
-	 */
-	pte_clear(&init_mm, addr, ptep);
-	flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
-}
-
-static int __do_patch_instruction_mm(u32 *addr, ppc_inst_t instr)
+static int __do_patch_mem_mm(void *addr, unsigned long val, bool is_dword)
 {
 	int err;
 	u32 *patch_addr;
@@ -305,7 +259,7 @@ static int __do_patch_instruction_mm(u32 *addr, ppc_inst_t instr)
 
 	orig_mm = start_using_temp_mm(patching_mm);
 
-	err = __patch_instruction(addr, instr, patch_addr);
+	err = __patch_mem(addr, val, patch_addr, is_dword);
 
 	/* context synchronisation performed by __patch_instruction (isync or exception) */
 	stop_using_temp_mm(patching_mm, orig_mm);
@@ -322,7 +276,7 @@ static int __do_patch_instruction_mm(u32 *addr, ppc_inst_t instr)
 	return err;
 }
 
-static int __do_patch_instruction(u32 *addr, ppc_inst_t instr)
+static int __do_patch_mem(void *addr, unsigned long val, bool is_dword)
 {
 	int err;
 	u32 *patch_addr;
@@ -339,7 +293,7 @@ static int __do_patch_instruction(u32 *addr, ppc_inst_t instr)
 	if (radix_enabled())
 		asm volatile("ptesync": : :"memory");
 
-	err = __patch_instruction(addr, instr, patch_addr);
+	err = __patch_mem(addr, val, patch_addr, is_dword);
 
 	pte_clear(&init_mm, text_poke_addr, pte);
 	flush_tlb_kernel_range(text_poke_addr, text_poke_addr + PAGE_SIZE);
@@ -347,7 +301,7 @@ static int __do_patch_instruction(u32 *addr, ppc_inst_t instr)
 	return err;
 }
 
-int patch_instruction(u32 *addr, ppc_inst_t instr)
+static int patch_mem(void *addr, unsigned long val, bool is_dword)
 {
 	int err;
 	unsigned long flags;
@@ -359,18 +313,56 @@ int patch_instruction(u32 *addr, ppc_inst_t instr)
 	 */
 	if (!IS_ENABLED(CONFIG_STRICT_KERNEL_RWX) ||
 	    !static_branch_likely(&poking_init_done))
-		return raw_patch_instruction(addr, instr);
+		return __patch_mem(addr, val, addr, is_dword);
 
 	local_irq_save(flags);
 	if (mm_patch_enabled())
-		err = __do_patch_instruction_mm(addr, instr);
+		err = __do_patch_mem_mm(addr, val, is_dword);
 	else
-		err = __do_patch_instruction(addr, instr);
+		err = __do_patch_mem(addr, val, is_dword);
 	local_irq_restore(flags);
 
 	return err;
 }
+
+#ifdef CONFIG_PPC64
+
+int patch_instruction(u32 *addr, ppc_inst_t instr)
+{
+	if (ppc_inst_prefixed(instr))
+		return patch_mem(addr, ppc_inst_as_ulong(instr), true);
+	else
+		return patch_mem(addr, ppc_inst_val(instr), false);
+}
 NOKPROBE_SYMBOL(patch_instruction);
+
+int patch_uint(void *addr, unsigned int val)
+{
+	if (!IS_ALIGNED((unsigned long)addr, sizeof(unsigned int)))
+		return -EINVAL;
+
+	return patch_mem(addr, val, false);
+}
+NOKPROBE_SYMBOL(patch_uint);
+
+int patch_ulong(void *addr, unsigned long val)
+{
+	if (!IS_ALIGNED((unsigned long)addr, sizeof(unsigned long)))
+		return -EINVAL;
+
+	return patch_mem(addr, val, true);
+}
+NOKPROBE_SYMBOL(patch_ulong);
+
+#else
+
+int patch_instruction(u32 *addr, ppc_inst_t instr)
+{
+	return patch_mem(addr, ppc_inst_val(instr), false);
+}
+NOKPROBE_SYMBOL(patch_instruction)
+
+#endif
 
 static int patch_memset64(u64 *addr, u64 val, size_t count)
 {
@@ -453,7 +445,9 @@ static int __do_patch_instructions_mm(u32 *addr, u32 *code, size_t len, bool rep
 
 	orig_mm = start_using_temp_mm(patching_mm);
 
+	kasan_disable_current();
 	err = __patch_instructions(patch_addr, code, len, repeat_instr);
+	kasan_enable_current();
 
 	/* context synchronisation performed by __patch_instructions */
 	stop_using_temp_mm(patching_mm, orig_mm);

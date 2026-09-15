@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 /* Copyright (c) 2024, Oracle and/or its affiliates. */
 
 #ifndef _GNU_SOURCE
@@ -212,7 +212,7 @@ static int btf_relocate_map_distilled_base(struct btf_relocate *r)
 	 * need to match both name and size, otherwise embedding the base
 	 * struct/union in the split type is invalid.
 	 */
-	for (id = r->nr_dist_base_types; id < r->nr_split_types; id++) {
+	for (id = r->nr_dist_base_types; id < r->nr_dist_base_types + r->nr_split_types; id++) {
 		err = btf_mark_embedded_composite_type_ids(r, id);
 		if (err)
 			goto done;
@@ -280,7 +280,7 @@ static int btf_relocate_map_distilled_base(struct btf_relocate *r)
 		     cmp_btf_name_size(&base_info, dist_info) == 0;
 		     dist_info++) {
 			if (!dist_info->id || dist_info->id >= r->nr_dist_base_types) {
-				pr_warn("base BTF id [%d] maps to invalid distilled base BTF id [%d]\n",
+				pr_warn("base BTF id [%u] maps to invalid distilled base BTF id [%u]\n",
 					id, dist_info->id);
 				err = -EINVAL;
 				goto done;
@@ -368,7 +368,7 @@ static int btf_relocate_map_distilled_base(struct btf_relocate *r)
 			continue;
 		dist_t = btf_type_by_id(r->dist_base_btf, id);
 		name = btf__name_by_offset(r->dist_base_btf, dist_t->name_off);
-		pr_warn("distilled base BTF type '%s' [%d] is not mapped to base BTF id\n",
+		pr_warn("distilled base BTF type '%s' [%u] is not mapped to base BTF id\n",
 			name, id);
 		err = -EINVAL;
 		break;
@@ -397,11 +397,11 @@ static int btf_relocate_validate_distilled_base(struct btf_relocate *r)
 		case BTF_KIND_FWD:
 			if (t->name_off)
 				break;
-			pr_warn("type [%d], kind [%d] is invalid for distilled base BTF; it is anonymous\n",
+			pr_warn("type [%u], kind [%d] is invalid for distilled base BTF; it is anonymous\n",
 				i, kind);
 			return -EINVAL;
 		default:
-			pr_warn("type [%d] in distilled based BTF has unexpected kind [%d]\n",
+			pr_warn("type [%u] in distilled based BTF has unexpected kind [%d]\n",
 				i, kind);
 			return -EINVAL;
 		}
@@ -428,7 +428,7 @@ static int btf_relocate_rewrite_strs(struct btf_relocate *r, __u32 i)
 		} else {
 			off = r->str_map[*str_off];
 			if (!off) {
-				pr_warn("string '%s' [offset %u] is not mapped to base BTF",
+				pr_warn("string '%s' [offset %u] is not mapped to base BTF\n",
 					btf__str_by_offset(r->btf, off), *str_off);
 				return -ENOENT;
 			}

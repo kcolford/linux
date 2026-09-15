@@ -7,12 +7,12 @@
  * a histogram of results, along various sorting keys.
  */
 #include "builtin.h"
+#include "perf.h"
 
 #include "util/color.h"
 #include <linux/list.h>
 #include "util/cache.h"
 #include <linux/rbtree.h>
-#include <linux/zalloc.h>
 #include "util/symbol.h"
 
 #include "util/debug.h"
@@ -176,29 +176,26 @@ static int hist_iter__branch_callback(struct hist_entry_iter *iter,
 	struct hist_entry *he = iter->he;
 	struct branch_info *bi;
 	struct perf_sample *sample = iter->sample;
-	struct evsel *evsel = iter->evsel;
 	int err;
 
 	bi = he->branch_info;
-	err = addr_map_symbol__inc_samples(&bi->from, sample, evsel);
+	err = addr_map_symbol__inc_samples(&bi->from, sample);
 
 	if (err)
 		goto out;
 
-	err = addr_map_symbol__inc_samples(&bi->to, sample, evsel);
+	err = addr_map_symbol__inc_samples(&bi->to, sample);
 
 out:
 	return err;
 }
 
-static int process_branch_callback(struct evsel *evsel,
-				   struct perf_sample *sample,
+static int process_branch_callback(struct perf_sample *sample,
 				   struct addr_location *al,
 				   struct perf_annotate *ann,
 				   struct machine *machine)
 {
 	struct hist_entry_iter iter = {
-		.evsel		= evsel,
 		.sample		= sample,
 		.add_entry_cb	= hist_iter__branch_callback,
 		.hide_unresolved	= symbol_conf.hide_unresolved,
@@ -221,7 +218,8 @@ static int process_branch_callback(struct evsel *evsel,
 	if (a.map != NULL)
 		dso__set_hit(map__dso(a.map));
 
-	hist__account_cycles(sample->branch_stack, al, sample, false, NULL);
+	hist__account_cycles(sample->branch_stack, al, sample, /*nonany_branch_mode=*/false,
+			     /*total_cycles=*/NULL);
 
 	ret = hist_entry_iter__add(&iter, &a, PERF_MAX_STACK_DEPTH, ann);
 out:
@@ -234,11 +232,11 @@ static bool has_annotation(struct perf_annotate *ann)
 	return ui__has_annotation() || ann->use_stdio2;
 }
 
-static int evsel__add_sample(struct evsel *evsel, struct perf_sample *sample,
-			     struct addr_location *al, struct perf_annotate *ann,
-			     struct machine *machine)
+static int add_sample(struct perf_sample *sample,
+		      struct addr_location *al, struct perf_annotate *ann,
+		      struct machine *machine)
 {
-	struct hists *hists = evsel__hists(evsel);
+	struct hists *hists = evsel__hists(sample->evsel);
 	struct hist_entry *he;
 	int ret;
 
@@ -268,21 +266,20 @@ static int evsel__add_sample(struct evsel *evsel, struct perf_sample *sample,
 	process_branch_stack(sample->branch_stack, al, sample);
 
 	if (ann->has_br_stack && has_annotation(ann))
-		return process_branch_callback(evsel, sample, al, ann, machine);
+		return process_branch_callback(sample, al, ann, machine);
 
 	he = hists__add_entry(hists, al, NULL, NULL, NULL, NULL, sample, true);
 	if (he == NULL)
 		return -ENOMEM;
 
-	ret = hist_entry__inc_addr_samples(he, sample, evsel, al->addr);
+	ret = hist_entry__inc_addr_samples(he, sample, al->addr);
 	hists__inc_nr_samples(hists, true);
 	return ret;
 }
 
-static int process_sample_event(struct perf_tool *tool,
+static int process_sample_event(const struct perf_tool *tool,
 				union perf_event *event,
 				struct perf_sample *sample,
-				struct evsel *evsel,
 				struct machine *machine)
 {
 	struct perf_annotate *ann = container_of(tool, struct perf_annotate, tool);
@@ -291,17 +288,19 @@ static int process_sample_event(struct perf_tool *tool,
 
 	addr_location__init(&al);
 	if (machine__resolve(machine, &al, sample) < 0) {
-		pr_warning("problem processing %d event, skipping it.\n",
-			   event->header.type);
+		pr_warning("problem processing %s (%u) event at offset %#" PRIx64 ", skipping it.\n",
+			   perf_event__name(event->header.type), event->header.type,
+			   sample->file_offset);
 		ret = -1;
 		goto out_put;
 	}
 
-	if (ann->cpu_list && !test_bit(sample->cpu, ann->cpu_bitmap))
+	if (ann->cpu_list && (sample->cpu >= MAX_NR_CPUS ||
+			     !test_bit(sample->cpu, ann->cpu_bitmap)))
 		goto out_put;
 
 	if (!al.filtered &&
-	    evsel__add_sample(evsel, sample, &al, ann, machine)) {
+	    add_sample(sample, &al, ann, machine)) {
 		pr_warning("problem incrementing symbol count, "
 			   "skipping event\n");
 		ret = -1;
@@ -311,22 +310,14 @@ out_put:
 	return ret;
 }
 
-static int process_feature_event(struct perf_session *session,
-				 union perf_event *event)
-{
-	if (event->feat.feat_id < HEADER_LAST_FEATURE)
-		return perf_event__process_feature(session, event);
-	return 0;
-}
-
-static int hist_entry__tty_annotate(struct hist_entry *he,
+static int hist_entry__stdio_annotate(struct hist_entry *he,
 				    struct evsel *evsel,
 				    struct perf_annotate *ann)
 {
-	if (!ann->use_stdio2)
-		return symbol__tty_annotate(&he->ms, evsel);
+	if (ann->use_stdio2)
+		return hist_entry__tty_annotate2(he, evsel);
 
-	return symbol__tty_annotate2(&he->ms, evsel);
+	return hist_entry__tty_annotate(he, evsel);
 }
 
 static void print_annotate_data_stat(struct annotated_data_stat *s)
@@ -396,10 +387,10 @@ static void print_annotate_item_stat(struct list_head *head, const char *title)
 	printf("total %d, ok %d (%.1f%%), bad %d (%.1f%%)\n\n", total,
 	       total_good, 100.0 * total_good / (total ?: 1),
 	       total_bad, 100.0 * total_bad / (total ?: 1));
-	printf("  %-10s: %5s %5s\n", "Name", "Good", "Bad");
+	printf("  %-20s: %5s %5s\n", "Name/opcode", "Good", "Bad");
 	printf("-----------------------------------------------------------\n");
 	list_for_each_entry(istat, head, list)
-		printf("  %-10s: %5d %5d\n", istat->name, istat->good, istat->bad);
+		printf("  %-20s: %5d %5d\n", istat->name, istat->good, istat->bad);
 	printf("\n");
 }
 
@@ -517,7 +508,7 @@ find_next:
 			/* skip missing symbols */
 			nd = rb_next(nd);
 		} else if (use_browser == 1) {
-			key = hist_entry__tui_annotate(he, evsel, NULL);
+			key = hist_entry__tui_annotate(he, evsel, NULL, NO_ADDR);
 
 			switch (key) {
 			case -1:
@@ -539,7 +530,7 @@ find_next:
 			if (next != NULL)
 				nd = next;
 		} else {
-			hist_entry__tty_annotate(he, evsel, ann);
+			hist_entry__stdio_annotate(he, evsel, ann);
 			nd = rb_next(nd);
 		}
 	}
@@ -560,7 +551,7 @@ static int __cmd_annotate(struct perf_annotate *ann)
 	}
 
 	if (!annotate_opts.objdump_path) {
-		ret = perf_env__lookup_objdump(&session->header.env,
+		ret = perf_env__lookup_objdump(perf_session__env(session),
 					       &annotate_opts.objdump_path);
 		if (ret)
 			goto out;
@@ -569,6 +560,10 @@ static int __cmd_annotate(struct perf_annotate *ann)
 	ret = perf_session__process_events(session);
 	if (ret)
 		goto out;
+
+	if ((use_browser == 1 || ann->use_stdio2) && ann->has_br_stack)
+		if (evlist__nr_br_cntr(session->evlist) > 0)
+			annotate_opts.show_br_cntr = true;
 
 	if (dump_trace) {
 		perf_session__fprintf_nr_events(session, stdout);
@@ -632,12 +627,22 @@ static int __cmd_annotate(struct perf_annotate *ann)
 	evlist__for_each_entry(session->evlist, pos) {
 		struct hists *hists = evsel__hists(pos);
 		u32 nr_samples = hists->stats.nr_samples;
+		struct ui_progress prog;
+		struct evsel *evsel;
+
+		if (!symbol_conf.event_group || !evsel__is_group_leader(pos))
+			continue;
+
+		for_each_group_member(evsel, pos)
+			nr_samples += evsel__hists(evsel)->stats.nr_samples;
 
 		if (nr_samples == 0)
 			continue;
 
-		if (!symbol_conf.event_group || !evsel__is_group_leader(pos))
-			continue;
+		ui_progress__init(&prog, nr_samples,
+				  "Sorting group events for output...");
+		evsel__output_resort(pos, &prog);
+		ui_progress__finish();
 
 		hists__find_annotations(hists, pos, ann);
 	}
@@ -686,28 +691,7 @@ static const char * const annotate_usage[] = {
 
 int cmd_annotate(int argc, const char **argv)
 {
-	struct perf_annotate annotate = {
-		.tool = {
-			.sample	= process_sample_event,
-			.mmap	= perf_event__process_mmap,
-			.mmap2	= perf_event__process_mmap2,
-			.comm	= perf_event__process_comm,
-			.exit	= perf_event__process_exit,
-			.fork	= perf_event__process_fork,
-			.namespaces = perf_event__process_namespaces,
-			.attr	= perf_event__process_attr,
-			.build_id = perf_event__process_build_id,
-#ifdef HAVE_LIBTRACEEVENT
-			.tracing_data   = perf_event__process_tracing_data,
-#endif
-			.id_index	= perf_event__process_id_index,
-			.auxtrace_info	= perf_event__process_auxtrace_info,
-			.auxtrace	= perf_event__process_auxtrace,
-			.feature	= process_feature_event,
-			.ordered_events = true,
-			.ordering_requires_timestamps = true,
-		},
-	};
+	struct perf_annotate annotate = {};
 	struct perf_data data = {
 		.mode  = PERF_DATA_MODE_READ,
 	};
@@ -752,8 +736,7 @@ int cmd_annotate(int argc, const char **argv)
 			&annotate.group_set,
 			"Show event group information together"),
 	OPT_STRING('C', "cpu", &annotate.cpu_list, "cpu", "list of cpus to profile"),
-	OPT_CALLBACK(0, "symfs", NULL, "directory",
-		     "Look for files with symbols relative to this directory",
+	OPT_CALLBACK(0, "symfs", NULL, "directory[,layout]", SYMFS_HELP,
 		     symbol__config_symfs),
 	OPT_BOOLEAN(0, "source", &annotate_opts.annotate_src,
 		    "Interleave source code with assembly code (default)"),
@@ -795,6 +778,10 @@ int cmd_annotate(int argc, const char **argv)
 		    "Show stats for the data type annotation"),
 	OPT_BOOLEAN(0, "insn-stat", &annotate.insn_stat,
 		    "Show instruction stats for the data type annotation"),
+	OPT_BOOLEAN(0, "skip-empty", &symbol_conf.skip_empty,
+		    "Do not display empty (or dummy) events in the output"),
+	OPT_BOOLEAN(0, "code-with-type", &annotate_opts.code_with_type,
+		    "Show data type info in code annotation (memory instructions only)"),
 	OPT_END()
 	};
 	int ret;
@@ -848,7 +835,7 @@ int cmd_annotate(int argc, const char **argv)
 	}
 #endif
 
-#ifndef HAVE_DWARF_GETLOCATIONS_SUPPORT
+#ifndef HAVE_LIBDW_SUPPORT
 	if (annotate.data_type) {
 		pr_err("Error: Data type profiling is disabled due to missing DWARF support\n");
 		return -ENOTSUP;
@@ -863,6 +850,25 @@ int cmd_annotate(int argc, const char **argv)
 		perf_quiet_option();
 
 	data.path = input_name;
+
+	perf_tool__init(&annotate.tool, /*ordered_events=*/true);
+	annotate.tool.sample	= process_sample_event;
+	annotate.tool.mmap	= perf_event__process_mmap;
+	annotate.tool.mmap2	= perf_event__process_mmap2;
+	annotate.tool.comm	= perf_event__process_comm;
+	annotate.tool.exit	= perf_event__process_exit;
+	annotate.tool.fork	= perf_event__process_fork;
+	annotate.tool.namespaces = perf_event__process_namespaces;
+	annotate.tool.attr	= perf_event__process_attr;
+	annotate.tool.build_id = perf_event__process_build_id;
+#ifdef HAVE_LIBTRACEEVENT
+	annotate.tool.tracing_data   = perf_event__process_tracing_data;
+#endif
+	annotate.tool.id_index	= perf_event__process_id_index;
+	annotate.tool.auxtrace_info	= perf_event__process_auxtrace_info;
+	annotate.tool.auxtrace	= perf_event__process_auxtrace;
+	annotate.tool.feature	= perf_event__process_feature;
+	annotate.tool.ordering_requires_timestamps = true;
 
 	annotate.session = perf_session__new(&data, &annotate.tool);
 	if (IS_ERR(annotate.session))
@@ -882,7 +888,7 @@ int cmd_annotate(int argc, const char **argv)
 
 	symbol_conf.try_vmlinux_path = true;
 
-	ret = symbol__init(&annotate.session->header.env);
+	ret = symbol__init(perf_session__env(annotate.session));
 	if (ret < 0)
 		goto out_delete;
 
@@ -901,6 +907,8 @@ int cmd_annotate(int argc, const char **argv)
 		annotate_opts.annotate_src = false;
 		symbol_conf.annotate_data_member = true;
 		symbol_conf.annotate_data_sample = true;
+	} else if (annotate_opts.code_with_type) {
+		symbol_conf.annotate_data_member = true;
 	}
 
 	setup_browser(true);
@@ -916,13 +924,17 @@ int cmd_annotate(int argc, const char **argv)
 		sort_order = "dso,symbol";
 
 	/*
-	 * Set SORT_MODE__BRANCH so that annotate display IPC/Cycle
-	 * if branch info is in perf data in TUI mode.
+	 * Set SORT_MODE__BRANCH so that annotate displays IPC/Cycle and
+	 * branch counters, if the corresponding branch info is available
+	 * in the perf data in the TUI mode.
 	 */
-	if ((use_browser == 1 || annotate.use_stdio2) && annotate.has_br_stack)
+	if ((use_browser == 1 || annotate.use_stdio2) && annotate.has_br_stack) {
 		sort__mode = SORT_MODE__BRANCH;
+		if (evlist__nr_br_cntr(annotate.session->evlist) > 0)
+			annotate_opts.show_br_cntr = true;
+	}
 
-	if (setup_sorting(NULL) < 0)
+	if (setup_sorting(/*evlist=*/NULL, perf_session__env(annotate.session)) < 0)
 		usage_with_options(annotate_usage, options);
 
 	ret = __cmd_annotate(&annotate);

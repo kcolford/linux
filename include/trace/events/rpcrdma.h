@@ -392,10 +392,10 @@ DECLARE_EVENT_CLASS(xprtrdma_rdch_event,
 		const struct rpc_task *task,
 		unsigned int pos,
 		struct rpcrdma_mr *mr,
-		int nsegs
+		bool is_last
 	),
 
-	TP_ARGS(task, pos, mr, nsegs),
+	TP_ARGS(task, pos, mr, is_last),
 
 	TP_STRUCT__entry(
 		__field(unsigned int, task_id)
@@ -405,7 +405,7 @@ DECLARE_EVENT_CLASS(xprtrdma_rdch_event,
 		__field(u32, handle)
 		__field(u32, length)
 		__field(u64, offset)
-		__field(int, nsegs)
+		__field(bool, is_last)
 	),
 
 	TP_fast_assign(
@@ -416,7 +416,7 @@ DECLARE_EVENT_CLASS(xprtrdma_rdch_event,
 		__entry->handle = mr->mr_handle;
 		__entry->length = mr->mr_length;
 		__entry->offset = mr->mr_offset;
-		__entry->nsegs = nsegs;
+		__entry->is_last = is_last;
 	),
 
 	TP_printk(SUNRPC_TRACE_TASK_SPECIFIER
@@ -424,7 +424,7 @@ DECLARE_EVENT_CLASS(xprtrdma_rdch_event,
 		__entry->task_id, __entry->client_id,
 		__entry->pos, __entry->length,
 		(unsigned long long)__entry->offset, __entry->handle,
-		__entry->nents < __entry->nsegs ? "more" : "last"
+		__entry->is_last ? "last" : "more"
 	)
 );
 
@@ -434,18 +434,18 @@ DECLARE_EVENT_CLASS(xprtrdma_rdch_event,
 					const struct rpc_task *task,	\
 					unsigned int pos,		\
 					struct rpcrdma_mr *mr,		\
-					int nsegs			\
+					bool is_last			\
 				),					\
-				TP_ARGS(task, pos, mr, nsegs))
+				TP_ARGS(task, pos, mr, is_last))
 
 DECLARE_EVENT_CLASS(xprtrdma_wrch_event,
 	TP_PROTO(
 		const struct rpc_task *task,
 		struct rpcrdma_mr *mr,
-		int nsegs
+		bool is_last
 	),
 
-	TP_ARGS(task, mr, nsegs),
+	TP_ARGS(task, mr, is_last),
 
 	TP_STRUCT__entry(
 		__field(unsigned int, task_id)
@@ -454,7 +454,7 @@ DECLARE_EVENT_CLASS(xprtrdma_wrch_event,
 		__field(u32, handle)
 		__field(u32, length)
 		__field(u64, offset)
-		__field(int, nsegs)
+		__field(bool, is_last)
 	),
 
 	TP_fast_assign(
@@ -464,7 +464,7 @@ DECLARE_EVENT_CLASS(xprtrdma_wrch_event,
 		__entry->handle = mr->mr_handle;
 		__entry->length = mr->mr_length;
 		__entry->offset = mr->mr_offset;
-		__entry->nsegs = nsegs;
+		__entry->is_last = is_last;
 	),
 
 	TP_printk(SUNRPC_TRACE_TASK_SPECIFIER
@@ -472,7 +472,7 @@ DECLARE_EVENT_CLASS(xprtrdma_wrch_event,
 		__entry->task_id, __entry->client_id,
 		__entry->length, (unsigned long long)__entry->offset,
 		__entry->handle,
-		__entry->nents < __entry->nsegs ? "more" : "last"
+		__entry->is_last ? "last" : "more"
 	)
 );
 
@@ -481,9 +481,9 @@ DECLARE_EVENT_CLASS(xprtrdma_wrch_event,
 				TP_PROTO(				\
 					const struct rpc_task *task,	\
 					struct rpcrdma_mr *mr,		\
-					int nsegs			\
+					bool is_last			\
 				),					\
-				TP_ARGS(task, mr, nsegs))
+				TP_ARGS(task, mr, is_last))
 
 TRACE_DEFINE_ENUM(DMA_BIDIRECTIONAL);
 TRACE_DEFINE_ENUM(DMA_TO_DEVICE);
@@ -2172,6 +2172,29 @@ TRACE_EVENT(svcrdma_qp_error,
 	)
 );
 
+TRACE_EVENT(svcrdma_device_removal,
+	TP_PROTO(
+		const struct rdma_cm_id *id
+	),
+
+	TP_ARGS(id),
+
+	TP_STRUCT__entry(
+		__string(name, id->device->name)
+		__array(unsigned char, addr, sizeof(struct sockaddr_in6))
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		memcpy(__entry->addr, &id->route.addr.dst_addr,
+		       sizeof(struct sockaddr_in6));
+	),
+
+	TP_printk("device %s to be removed, disconnecting %pISpc\n",
+		__get_str(name), __entry->addr
+	)
+);
+
 DECLARE_EVENT_CLASS(svcrdma_sendqueue_class,
 	TP_PROTO(
 		const struct svcxprt_rdma *rdma,
@@ -2276,6 +2299,42 @@ DEFINE_CLIENT_DEVICE_EVENT(rpcrdma_client_add_one);
 DEFINE_CLIENT_DEVICE_EVENT(rpcrdma_client_remove_one);
 DEFINE_CLIENT_DEVICE_EVENT(rpcrdma_client_wait_on);
 DEFINE_CLIENT_DEVICE_EVENT(rpcrdma_client_remove_one_done);
+
+DECLARE_EVENT_CLASS(rpcrdma_client_register_class,
+	TP_PROTO(
+		const struct ib_device *device,
+		const struct rpcrdma_notification *rn
+	),
+
+	TP_ARGS(device, rn),
+
+	TP_STRUCT__entry(
+		__string(name, device->name)
+		__field(void *, callback)
+		__field(u32, index)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->callback = rn->rn_done;
+		__entry->index = rn->rn_index;
+	),
+
+	TP_printk("device=%s index=%u done callback=%pS\n",
+		__get_str(name), __entry->index, __entry->callback
+	)
+);
+
+#define DEFINE_CLIENT_REGISTER_EVENT(name)				\
+	DEFINE_EVENT(rpcrdma_client_register_class, name,		\
+	TP_PROTO(							\
+		const struct ib_device *device,				\
+		const struct rpcrdma_notification *rn			\
+	),								\
+	TP_ARGS(device, rn))
+
+DEFINE_CLIENT_REGISTER_EVENT(rpcrdma_client_register);
+DEFINE_CLIENT_REGISTER_EVENT(rpcrdma_client_unregister);
 
 #endif /* _TRACE_RPCRDMA_H */
 

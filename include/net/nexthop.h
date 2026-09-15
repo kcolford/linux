@@ -28,6 +28,7 @@ struct nh_config {
 	u8		nh_protocol;
 	u8		nh_blackhole;
 	u8		nh_fdb;
+	__be16		nh_dst_port;
 	u32		nh_flags;
 
 	int		nh_ifindex;
@@ -63,6 +64,7 @@ struct nh_info {
 	u8			family;
 	bool			reject_nh;
 	bool			fdb_nh;
+	__be16			dst_port;
 
 	union {
 		struct fib_nh_common	fib_nhc;
@@ -105,7 +107,7 @@ struct nh_grp_entry_stats {
 struct nh_grp_entry {
 	struct nexthop	*nh;
 	struct nh_grp_entry_stats __percpu	*stats;
-	u8		weight;
+	u16		weight;
 
 	union {
 		struct {
@@ -152,6 +154,8 @@ struct nexthop {
 	u8			protocol;   /* app managing this nh */
 	u8			nh_flags;
 	bool			is_group;
+	bool			dead;
+	spinlock_t		lock;       /* protect dead and f6i_list */
 
 	refcount_t		refcnt;
 	struct rcu_head		rcu;
@@ -192,7 +196,7 @@ struct nh_notifier_single_info {
 };
 
 struct nh_notifier_grp_entry_info {
-	u8 weight;
+	u16 weight;
 	struct nh_notifier_single_info nh;
 };
 
@@ -572,7 +576,8 @@ struct fib_nh_common *nexthop_fdb_nhc(struct nexthop *nh)
 }
 
 static inline struct fib_nh_common *nexthop_path_fdb_result(struct nexthop *nh,
-							    int hash)
+							    int hash,
+							    __be16 *dst_port)
 {
 	struct nh_info *nhi;
 	struct nexthop *nhp;
@@ -581,6 +586,7 @@ static inline struct fib_nh_common *nexthop_path_fdb_result(struct nexthop *nh,
 	if (unlikely(!nhp))
 		return NULL;
 	nhi = rcu_dereference(nhp->nh_info);
+	*dst_port = nhi->dst_port;
 	return &nhi->fib_nhc;
 }
 #endif

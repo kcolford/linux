@@ -15,7 +15,6 @@
 #include <linux/iio/machine.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -351,7 +350,7 @@ static int berlin2_adc_probe(struct platform_device *pdev)
 
 static const struct of_device_id berlin2_adc_match[] = {
 	{ .compatible = "marvell,berlin2-adc", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, berlin2_adc_match);
 

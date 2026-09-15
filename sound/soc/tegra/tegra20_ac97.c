@@ -441,6 +441,7 @@ static const struct of_device_id tegra20_ac97_of_match[] = {
 	{ .compatible = "nvidia,tegra20-ac97", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, tegra20_ac97_of_match);
 
 static struct platform_driver tegra20_ac97_driver = {
 	.driver = {
@@ -448,7 +449,7 @@ static struct platform_driver tegra20_ac97_driver = {
 		.of_match_table = tegra20_ac97_of_match,
 	},
 	.probe = tegra20_ac97_platform_probe,
-	.remove_new = tegra20_ac97_platform_remove,
+	.remove = tegra20_ac97_platform_remove,
 };
 module_platform_driver(tegra20_ac97_driver);
 
@@ -456,4 +457,3 @@ MODULE_AUTHOR("Lucas Stach");
 MODULE_DESCRIPTION("Tegra20 AC97 ASoC driver");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);
-MODULE_DEVICE_TABLE(of, tegra20_ac97_of_match);

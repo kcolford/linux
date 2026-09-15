@@ -5,7 +5,6 @@
  * Copyright IBM Corp. 1999, 2009
  */
 
-#define KMSG_COMPONENT "dasd-fba"
 
 #include <linux/stddef.h>
 #include <linux/kernel.h>
@@ -32,6 +31,7 @@
 #define DASD_FBA_CCW_LOCATE 0x43
 #define DASD_FBA_CCW_DEFINE_EXTENT 0x63
 
+MODULE_DESCRIPTION("S/390 DASD FBA Disks device driver");
 MODULE_LICENSE("GPL");
 
 static struct dasd_discipline dasd_fba_discipline;
@@ -119,7 +119,7 @@ dasd_fba_check_characteristics(struct dasd_device *device)
 	int readonly, rc;
 
 	if (!private) {
-		private = kzalloc(sizeof(*private), GFP_KERNEL | GFP_DMA);
+		private = kzalloc_obj(*private, GFP_KERNEL | GFP_DMA);
 		if (!private) {
 			dev_warn(&device->cdev->dev,
 				 "Allocating memory for private DASD "

@@ -330,7 +330,7 @@ static int mscc_miim_probe(struct platform_device *pdev)
 
 	ret = of_mdiobus_register(bus, np);
 	if (ret < 0) {
-		dev_err(dev, "Cannot register MDIO bus (%d)\n", ret);
+		dev_err_probe(dev, ret, "Cannot register MDIO bus\n");
 		goto out_disable_clk;
 	}
 
@@ -377,7 +377,7 @@ MODULE_DEVICE_TABLE(of, mscc_miim_match);
 
 static struct platform_driver mscc_miim_driver = {
 	.probe = mscc_miim_probe,
-	.remove_new = mscc_miim_remove,
+	.remove = mscc_miim_remove,
 	.driver = {
 		.name = "mscc-miim",
 		.of_match_table = mscc_miim_match,

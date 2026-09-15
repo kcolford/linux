@@ -167,9 +167,11 @@ static void mtk_mmsys_update_bits(struct mtk_mmsys *mmsys, u32 offset, u32 mask,
 	u32 tmp;
 
 	if (mmsys->cmdq_base.size && cmdq_pkt) {
-		ret = cmdq_pkt_write_mask(cmdq_pkt, mmsys->cmdq_base.subsys,
-					  mmsys->cmdq_base.offset + offset, val,
-					  mask);
+		ret = mmsys->cmdq_base.pkt_write_mask(cmdq_pkt,
+						      mmsys->cmdq_base.subsys,
+						      mmsys->cmdq_base.pa_base,
+						      mmsys->cmdq_base.offset + offset,
+						      val, mask);
 		if (ret)
 			pr_debug("CMDQ unavailable: using CPU write\n");
 		else
@@ -487,7 +489,7 @@ static struct platform_driver mtk_mmsys_drv = {
 		.of_match_table = of_match_mtk_mmsys,
 	},
 	.probe = mtk_mmsys_probe,
-	.remove_new = mtk_mmsys_remove,
+	.remove = mtk_mmsys_remove,
 };
 module_platform_driver(mtk_mmsys_drv);
 

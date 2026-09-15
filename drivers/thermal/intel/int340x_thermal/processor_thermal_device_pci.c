@@ -272,35 +272,44 @@ static const struct thermal_zone_device_ops tzone_ops = {
 };
 
 static struct thermal_zone_params tzone_params = {
-	.governor_name = "user_space",
 	.no_hwmon = true,
 };
 
 static bool msi_irq;
 
+static void proc_thermal_free_msi(struct pci_dev *pdev, struct proc_thermal_pci *pci_info)
+{
+	int i;
+
+	for (i = 0; i < MSI_THERMAL_MAX; i++) {
+		if (proc_thermal_msi_map[i])
+			devm_free_irq(&pdev->dev, proc_thermal_msi_map[i], pci_info);
+	}
+
+	pci_free_irq_vectors(pdev);
+}
+
 static int proc_thermal_setup_msi(struct pci_dev *pdev, struct proc_thermal_pci *pci_info)
 {
-	int ret, i, irq;
+	int ret, i, irq, count;
 
-	ret = pci_alloc_irq_vectors(pdev, 1, MSI_THERMAL_MAX, PCI_IRQ_MSI | PCI_IRQ_MSIX);
-	if (ret < 0) {
+	count = pci_alloc_irq_vectors(pdev, 1, MSI_THERMAL_MAX, PCI_IRQ_MSI | PCI_IRQ_MSIX);
+	if (count < 0) {
 		dev_err(&pdev->dev, "Failed to allocate vectors!\n");
-		return ret;
+		return count;
 	}
 
 	dev_info(&pdev->dev, "msi enabled:%d msix enabled:%d\n", pdev->msi_enabled,
 		 pdev->msix_enabled);
 
-	for (i = 0; i < MSI_THERMAL_MAX; i++) {
+	for (i = 0; i < count; i++) {
 		irq =  pci_irq_vector(pdev, i);
 
 		ret = devm_request_threaded_irq(&pdev->dev, irq, proc_thermal_irq_handler,
 						proc_thermal_irq_thread_handler,
 						0, KBUILD_MODNAME, pci_info);
-		if (ret) {
-			dev_err(&pdev->dev, "Request IRQ %d failed\n", irq);
+		if (ret)
 			goto err_free_msi_vectors;
-		}
 
 		proc_thermal_msi_map[i] = irq;
 	}
@@ -310,7 +319,7 @@ static int proc_thermal_setup_msi(struct pci_dev *pdev, struct proc_thermal_pci 
 	return 0;
 
 err_free_msi_vectors:
-	pci_free_irq_vectors(pdev);
+	proc_thermal_free_msi(pdev, pci_info);
 
 	return ret;
 }
@@ -383,10 +392,8 @@ static int proc_thermal_pci_probe(struct pci_dev *pdev, const struct pci_device_
 		ret = devm_request_threaded_irq(&pdev->dev, irq, proc_thermal_irq_handler,
 						proc_thermal_irq_thread_handler, irq_flag,
 						KBUILD_MODNAME, pci_info);
-		if (ret) {
-			dev_err(&pdev->dev, "Request IRQ %d failed\n", pdev->irq);
+		if (ret)
 			goto err_ret_tzone;
-		}
 	}
 
 	ret = thermal_zone_device_enable(pci_info->tzone);
@@ -397,14 +404,13 @@ static int proc_thermal_pci_probe(struct pci_dev *pdev, const struct pci_device_
 
 err_free_vectors:
 	if (msi_irq)
-		pci_free_irq_vectors(pdev);
+		proc_thermal_free_msi(pdev, pci_info);
 err_ret_tzone:
 	thermal_zone_device_unregister(pci_info->tzone);
 err_del_legacy:
 	if (!pci_info->no_legacy)
 		proc_thermal_remove(proc_priv);
 	proc_thermal_mmio_remove(pdev, proc_priv);
-	pci_disable_device(pdev);
 
 	return ret;
 }
@@ -419,11 +425,13 @@ static void proc_thermal_pci_remove(struct pci_dev *pdev)
 	proc_thermal_mmio_write(pci_info, PROC_THERMAL_MMIO_THRES_0, 0);
 	proc_thermal_mmio_write(pci_info, PROC_THERMAL_MMIO_INT_ENABLE_0, 0);
 
+	if (msi_irq)
+		proc_thermal_free_msi(pdev, pci_info);
+
 	thermal_zone_device_unregister(pci_info->tzone);
 	proc_thermal_mmio_remove(pdev, pci_info->proc_priv);
 	if (!pci_info->no_legacy)
 		proc_thermal_remove(proc_priv);
-	pci_disable_device(pdev);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -473,8 +481,9 @@ static const struct pci_device_id proc_thermal_pci_ids[] = {
 	{ PCI_DEVICE_DATA(INTEL, ADL_THERMAL, PROC_THERMAL_FEATURE_RAPL |
 	  PROC_THERMAL_FEATURE_FIVR | PROC_THERMAL_FEATURE_DVFS | PROC_THERMAL_FEATURE_WT_REQ) },
 	{ PCI_DEVICE_DATA(INTEL, LNLM_THERMAL, PROC_THERMAL_FEATURE_MSI_SUPPORT |
-	  PROC_THERMAL_FEATURE_RAPL | PROC_THERMAL_FEATURE_DLVR |
-	  PROC_THERMAL_FEATURE_WT_HINT | PROC_THERMAL_FEATURE_POWER_FLOOR) },
+	  PROC_THERMAL_FEATURE_RAPL | PROC_THERMAL_FEATURE_DLVR | PROC_THERMAL_FEATURE_DVFS |
+	  PROC_THERMAL_FEATURE_WT_HINT | PROC_THERMAL_FEATURE_POWER_FLOOR |
+	  PROC_THERMAL_FEATURE_PTC) },
 	{ PCI_DEVICE_DATA(INTEL, MTLP_THERMAL, PROC_THERMAL_FEATURE_RAPL |
 	  PROC_THERMAL_FEATURE_FIVR | PROC_THERMAL_FEATURE_DVFS | PROC_THERMAL_FEATURE_DLVR |
 	  PROC_THERMAL_FEATURE_WT_HINT | PROC_THERMAL_FEATURE_POWER_FLOOR) },
@@ -482,6 +491,26 @@ static const struct pci_device_id proc_thermal_pci_ids[] = {
 	  PROC_THERMAL_FEATURE_DVFS | PROC_THERMAL_FEATURE_DLVR | PROC_THERMAL_FEATURE_WT_HINT) },
 	{ PCI_DEVICE_DATA(INTEL, RPL_THERMAL, PROC_THERMAL_FEATURE_RAPL |
 	  PROC_THERMAL_FEATURE_FIVR | PROC_THERMAL_FEATURE_DVFS | PROC_THERMAL_FEATURE_WT_REQ) },
+	{ PCI_DEVICE_DATA(INTEL, PTL_THERMAL, PROC_THERMAL_FEATURE_RAPL |
+	  PROC_THERMAL_FEATURE_DLVR | PROC_THERMAL_FEATURE_DVFS |
+	  PROC_THERMAL_FEATURE_MSI_SUPPORT | PROC_THERMAL_FEATURE_WT_HINT |
+	  PROC_THERMAL_FEATURE_POWER_FLOOR | PROC_THERMAL_FEATURE_PTC |
+	  PROC_THERMAL_FEATURE_SOC_POWER_SLIDER) },
+	{ PCI_DEVICE_DATA(INTEL, WCL_THERMAL, PROC_THERMAL_FEATURE_MSI_SUPPORT |
+	  PROC_THERMAL_FEATURE_RAPL | PROC_THERMAL_FEATURE_DLVR |
+	  PROC_THERMAL_FEATURE_DVFS | PROC_THERMAL_FEATURE_WT_HINT |
+	  PROC_THERMAL_FEATURE_POWER_FLOOR | PROC_THERMAL_FEATURE_PTC |
+	  PROC_THERMAL_FEATURE_SOC_POWER_SLIDER) },
+	{ PCI_DEVICE_DATA(INTEL, NVL_H_THERMAL, PROC_THERMAL_FEATURE_RAPL |
+	  PROC_THERMAL_FEATURE_DLVR | PROC_THERMAL_FEATURE_DVFS |
+	  PROC_THERMAL_FEATURE_MSI_SUPPORT | PROC_THERMAL_FEATURE_WT_HINT |
+	  PROC_THERMAL_FEATURE_POWER_FLOOR | PROC_THERMAL_FEATURE_PTC |
+	  PROC_THERMAL_FEATURE_SOC_POWER_SLIDER) },
+	{ PCI_DEVICE_DATA(INTEL, NVL_S_THERMAL, PROC_THERMAL_FEATURE_RAPL |
+	  PROC_THERMAL_FEATURE_DLVR | PROC_THERMAL_FEATURE_DVFS |
+	  PROC_THERMAL_FEATURE_MSI_SUPPORT | PROC_THERMAL_FEATURE_WT_HINT |
+	  PROC_THERMAL_FEATURE_POWER_FLOOR | PROC_THERMAL_FEATURE_PTC |
+	  PROC_THERMAL_FEATURE_SOC_POWER_SLIDER) },
 	{ },
 };
 
@@ -497,7 +526,7 @@ static struct pci_driver proc_thermal_pci_driver = {
 
 module_pci_driver(proc_thermal_pci_driver);
 
-MODULE_IMPORT_NS(INT340X_THERMAL);
+MODULE_IMPORT_NS("INT340X_THERMAL");
 
 MODULE_AUTHOR("Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>");
 MODULE_DESCRIPTION("Processor Thermal Reporting Device Driver");

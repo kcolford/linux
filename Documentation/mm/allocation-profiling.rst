@@ -18,18 +18,49 @@ kconfig options:
   missing annotation
 
 Boot parameter:
-  sysctl.vm.mem_profiling=0|1|never
+  sysctl.vm.mem_profiling={0|1|never}[,compressed]
 
   When set to "never", memory allocation profiling overhead is minimized and it
   cannot be enabled at runtime (sysctl becomes read-only).
   When CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT=y, default value is "1".
   When CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT=n, default value is "never".
+  "compressed" optional parameter will try to store page tag references in a
+  compact format, avoiding page extensions. This results in improved performance
+  and memory consumption, however it might fail depending on system configuration.
+  If compression fails, a warning is issued and memory allocation profiling gets
+  disabled.
 
 sysctl:
   /proc/sys/vm/mem_profiling
 
+  1: Enable memory profiling.
+
+  0: Disable memory profiling.
+
+  The default value depends on CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT.
+
+  When CONFIG_MEM_ALLOC_PROFILING_DEBUG=y, this control is read-only to avoid
+  warnings produced by allocations made while profiling is disabled and freed
+  when it's enabled.
+
+  /proc/sys/vm/mem_profiling_compressed
+
+  1: Page alloc tag compression is enabled.
+
+  0: Page alloc tag compression is disabled.
+
+  This reflects a static boot-time configuration of how page allocation tags are
+  stored (in page flags when compression is enabled and in page_ext when disabled).
+  Toggling ``mem_profiling`` at runtime does not change the state of
+  ``mem_profiling_compressed``.
+
 Runtime info:
   /proc/allocinfo
+
+  Profiling data can be retrieved either by reading `/proc/allocinfo` directly as
+  text or programmatically via `ioctl()` calls defined in `<uapi/linux/alloc_tag.h>`.
+  The ioctl interface supports structured binary data extraction as well as filtering
+  by module name, function, file, line number, accuracy, or allocation size limits.
 
 Example output::
 
@@ -97,3 +128,10 @@ To do so:
 
 - Then, use the following form for your allocations:
   alloc_hooks_tag(ht->your_saved_tag, kmalloc_noprof(...))
+
+Notes
+=====
+
+- When a slab object is allocated from KFENCE, its accounting is skipped.
+  KFENCE allocations are rare and limited to a small number, so this omission
+  is negligible.

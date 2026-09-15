@@ -9,12 +9,11 @@
 #include <linux/module.h>
 #include <linux/numa.h>
 
-static int e820_pmem_remove(struct platform_device *pdev)
+static void e820_pmem_remove(struct platform_device *pdev)
 {
 	struct nvdimm_bus *nvdimm_bus = platform_get_drvdata(pdev);
 
 	nvdimm_bus_unregister(nvdimm_bus);
-	return 0;
 }
 
 static int e820_register_one(struct resource *res, void *data)

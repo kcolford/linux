@@ -1592,14 +1592,14 @@ hclge_query_reg_info(struct hclge_dev *hdev,
 	}
 
 	kfree(msg->desc);
+	msg->desc = NULL;
 }
 
 static void hclge_query_reg_info_of_ssu(struct hclge_dev *hdev)
 {
 	u32 loop_para[HCLGE_MOD_MSG_PARA_ARRAY_MAX_SIZE] = {0};
 	struct hclge_mod_reg_common_msg msg;
-	u8 i, j, num;
-	u32 loop_time;
+	u8 i, j, num, loop_time;
 
 	num = ARRAY_SIZE(hclge_ssu_reg_common_msg);
 	for (i = 0; i < num; i++) {
@@ -1609,7 +1609,8 @@ static void hclge_query_reg_info_of_ssu(struct hclge_dev *hdev)
 		loop_time = 1;
 		loop_para[0] = 0;
 		if (msg.need_para) {
-			loop_time = hdev->ae_dev->dev_specs.tnl_num;
+			loop_time = min(hdev->ae_dev->dev_specs.tnl_num,
+					HCLGE_MOD_MSG_PARA_ARRAY_MAX_SIZE);
 			for (j = 0; j < loop_time; j++)
 				loop_para[j] = j + 1;
 		}
@@ -1761,7 +1762,7 @@ static const struct hclge_hw_type_id hclge_hw_type_id_st[] = {
 	},
 };
 
-static void hclge_log_error(struct device *dev, char *reg,
+static void hclge_log_error(struct device *dev, const char *reg,
 			    const struct hclge_hw_error *err,
 			    u32 err_sts, unsigned long *reset_requests)
 {
@@ -2481,7 +2482,7 @@ static int hclge_handle_all_ras_errors(struct hclge_dev *hdev)
 		return ret;
 
 	bd_num = max_t(u32, mpf_bd_num, pf_bd_num);
-	desc = kcalloc(bd_num, sizeof(struct hclge_desc), GFP_KERNEL);
+	desc = kzalloc_objs(struct hclge_desc, bd_num);
 	if (!desc)
 		return -ENOMEM;
 
@@ -3038,7 +3039,7 @@ static int hclge_handle_all_hw_msix_error(struct hclge_dev *hdev,
 		goto out;
 
 	bd_num = max_t(u32, mpf_bd_num, pf_bd_num);
-	desc = kcalloc(bd_num, sizeof(struct hclge_desc), GFP_KERNEL);
+	desc = kzalloc_objs(struct hclge_desc, bd_num);
 	if (!desc)
 		return -ENOMEM;
 
@@ -3127,7 +3128,7 @@ void hclge_handle_all_hns_hw_errors(struct hnae3_ae_dev *ae_dev)
 		return;
 
 	bd_num = max_t(u32, mpf_bd_num, pf_bd_num);
-	desc = kcalloc(bd_num, sizeof(struct hclge_desc), GFP_KERNEL);
+	desc = kzalloc_objs(struct hclge_desc, bd_num);
 	if (!desc)
 		return;
 

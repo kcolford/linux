@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // SPDX-FileCopyrightText: 2020 Marian Cichy <M.Cichy@pengutronix.de>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_damage_helper.h>
@@ -13,13 +14,13 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_of.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vblank.h>
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/dma-mapping.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -348,9 +349,9 @@ static struct drm_driver imx_lcdc_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	.fops = &imx_lcdc_drm_fops,
 	DRM_GEM_DMA_DRIVER_OPS_VMAP,
+	DRM_FBDEV_DMA_DRIVER_OPS,
 	.name = "imx-lcdc",
 	.desc = "i.MX LCDC driver",
-	.date = "20200716",
 };
 
 static const struct of_device_id imx_lcdc_of_dev_id[] = {
@@ -446,8 +447,6 @@ static int imx_lcdc_probe(struct platform_device *pdev)
 	if (IS_ERR(lcdc->connector))
 		return dev_err_probe(drm->dev, PTR_ERR(lcdc->connector), "Cannot init bridge connector\n");
 
-	drm_connector_attach_encoder(lcdc->connector, &lcdc->pipe.encoder);
-
 	/*
 	 * The LCDC controller does not have an enable bit. The
 	 * controller starts directly when the clocks are enabled.
@@ -501,7 +500,7 @@ static int imx_lcdc_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Cannot register device\n");
 
-	drm_fbdev_dma_setup(drm, 0);
+	drm_client_setup(drm, NULL);
 
 	return 0;
 }
@@ -525,7 +524,7 @@ static struct platform_driver imx_lcdc_driver = {
 		.of_match_table = imx_lcdc_of_dev_id,
 	},
 	.probe = imx_lcdc_probe,
-	.remove_new = imx_lcdc_remove,
+	.remove = imx_lcdc_remove,
 	.shutdown = imx_lcdc_shutdown,
 };
 module_platform_driver(imx_lcdc_driver);

@@ -8,6 +8,8 @@
 #include <linux/slab.h>
 
 #include "xe_exec_queue.h"
+#include "xe_gt_printk.h"
+#include "xe_guc_exec_queue_types.h"
 #include "xe_vm.h"
 
 static void preempt_fence_work_func(struct work_struct *w)
@@ -17,10 +19,25 @@ static void preempt_fence_work_func(struct work_struct *w)
 		container_of(w, typeof(*pfence), preempt_work);
 	struct xe_exec_queue *q = pfence->q;
 
-	if (pfence->error)
+	if (pfence->error) {
 		dma_fence_set_error(&pfence->base, pfence->error);
-	else
-		q->ops->suspend_wait(q);
+	} else if (!q->ops->reset_status(q)) {
+		int err = q->ops->suspend_wait(q);
+
+		if (err == -EAGAIN) {
+			xe_gt_dbg(q->gt, "PREEMPT FENCE RETRY guc_id=%d",
+				  q->guc->id);
+			queue_work(q->vm->xe->preempt_fence_wq,
+				   &pfence->preempt_work);
+			dma_fence_end_signalling(cookie);
+			return;
+		}
+
+		if (err)
+			dma_fence_set_error(&pfence->base, err);
+	} else {
+		dma_fence_set_error(&pfence->base, -ENOENT);
+	}
 
 	dma_fence_signal(&pfence->base);
 	/*
@@ -57,6 +74,13 @@ static bool preempt_fence_enable_signaling(struct dma_fence *fence)
 	struct xe_exec_queue *q = pfence->q;
 
 	pfence->error = q->ops->suspend(q);
+	/*
+	 * Record a successful suspend so the rebind worker only resumes queues
+	 * that were actually suspended; a failed suspend() leaves the queue
+	 * un-suspended and must not be paired with a resume().
+	 */
+	if (!pfence->error)
+		WRITE_ONCE(q->lr.suspended, true);
 	queue_work(q->vm->xe->preempt_fence_wq, &pfence->preempt_work);
 	return true;
 }
@@ -84,7 +108,7 @@ struct xe_preempt_fence *xe_preempt_fence_alloc(void)
 {
 	struct xe_preempt_fence *pfence;
 
-	pfence = kmalloc(sizeof(*pfence), GFP_KERNEL);
+	pfence = kmalloc_obj(*pfence);
 	if (!pfence)
 		return ERR_PTR(-ENOMEM);
 
@@ -128,8 +152,9 @@ xe_preempt_fence_arm(struct xe_preempt_fence *pfence, struct xe_exec_queue *q,
 {
 	list_del_init(&pfence->link);
 	pfence->q = xe_exec_queue_get(q);
+	spin_lock_init(&pfence->lock);
 	dma_fence_init(&pfence->base, &preempt_fence_ops,
-		      &q->lr.lock, context, seqno);
+		      &pfence->lock, context, seqno);
 
 	return &pfence->base;
 }

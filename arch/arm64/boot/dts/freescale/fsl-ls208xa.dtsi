@@ -63,20 +63,20 @@
 		its: msi-controller@6020000 {
 			compatible = "arm,gic-v3-its";
 			msi-controller;
+			#msi-cells = <1>;
 			reg = <0x0 0x6020000 0 0x20000>;
 		};
 	};
 
 	rstcr: syscon@1e60000 {
-		compatible = "fsl,ls2080a-rstcr", "syscon";
+		compatible = "fsl,ls1028a-reset", "syscon", "simple-mfd";
 		reg = <0x0 0x1e60000 0x0 0x4>;
-	};
 
-	reboot {
-		compatible = "syscon-reboot";
-		regmap = <&rstcr>;
-		offset = <0x0>;
-		mask = <0x2>;
+		reboot {
+			compatible = "syscon-reboot";
+			offset = <0x0>;
+			mask = <0x2>;
+		};
 	};
 
 	thermal-zones {
@@ -122,7 +122,7 @@
 			};
 		};
 
-		core-cluster1-thermal {
+		cluster1-thermal {
 			polling-delay-passive = <1000>;
 			polling-delay = <5000>;
 			thermal-sensors = <&tmu 4>;
@@ -151,7 +151,7 @@
 			};
 		};
 
-		core-cluster2-thermal {
+		cluster2-thermal {
 			polling-delay-passive = <1000>;
 			polling-delay = <5000>;
 			thermal-sensors = <&tmu 5>;
@@ -180,7 +180,7 @@
 			};
 		};
 
-		core-cluster3-thermal {
+		cluster3-thermal {
 			polling-delay-passive = <1000>;
 			polling-delay = <5000>;
 			thermal-sensors = <&tmu 6>;
@@ -209,7 +209,7 @@
 			};
 		};
 
-		core-cluster4-thermal {
+		cluster4-thermal {
 			polling-delay-passive = <1000>;
 			polling-delay = <5000>;
 			thermal-sensors = <&tmu 7>;
@@ -278,6 +278,104 @@
 			clocks = <&clockgen QORIQ_CLK_PLATFORM_PLL
 					    QORIQ_CLK_PLL_DIV(4)>;
 			clock-names = "sfp";
+		};
+
+		serdes1: phy@1ea0000 {
+			compatible = "fsl,ls2088a-serdes1";
+			reg = <0x00 0x1ea0000 0x0 0x2000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#phy-cells = <1>;
+			status = "disabled";
+
+			serdes1_lane_a: phy@0 {
+				reg = <0>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_b: phy@1 {
+				reg = <1>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_c: phy@2 {
+				reg = <2>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_d: phy@3 {
+				reg = <3>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_e: phy@4 {
+				reg = <4>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_f: phy@5 {
+				reg = <5>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_g: phy@6 {
+				reg = <6>;
+				#phy-cells = <0>;
+			};
+
+			serdes1_lane_h: phy@7 {
+				reg = <7>;
+				#phy-cells = <0>;
+			};
+		};
+
+		serdes2: phy@1eb0000 {
+			compatible = "fsl,ls2088a-serdes2";
+			reg = <0x00 0x1eb0000 0x0 0x2000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#phy-cells = <1>;
+			status = "disabled";
+
+			serdes2_lane_a: phy@0 {
+				reg = <0>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_b: phy@1 {
+				reg = <1>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_c: phy@2 {
+				reg = <2>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_d: phy@3 {
+				reg = <3>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_e: phy@4 {
+				reg = <4>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_f: phy@5 {
+				reg = <5>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_g: phy@6 {
+				reg = <6>;
+				#phy-cells = <0>;
+			};
+
+			serdes2_lane_h: phy@7 {
+				reg = <7>;
+				#phy-cells = <0>;
+			};
 		};
 
 		isc: syscon@1f70000 {
@@ -758,7 +856,7 @@
 			compatible = "fsl,qoriq-mc";
 			reg = <0x00000008 0x0c000000 0 0x40>,	 /* MC portal base */
 			      <0x00000000 0x08340000 0 0x40000>; /* MC control reg */
-			msi-parent = <&its>;
+			msi-parent = <&its 0>;
 			iommu-map = <0 &smmu 0 0>;	/* This is fixed-up by u-boot */
 			dma-coherent;
 			#address-cells = <3>;
@@ -881,7 +979,7 @@
 			reg = <0 0x5000000 0 0x800000>;
 			#global-interrupts = <12>;
 			#iommu-cells = <1>;
-			stream-match-mask = <0x7C00>;
+			stream-match-mask = <0x7c00>;
 			dma-coherent;
 			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>, /* global secure fault */
 				     <GIC_SPI 14 IRQ_TYPE_LEVEL_HIGH>, /* combined secure interrupt */
@@ -1075,7 +1173,7 @@
 		};
 
 		pcie1: pcie@3400000 {
-			compatible = "fsl,ls2080a-pcie", "fsl,ls2085a-pcie";
+			compatible = "fsl,ls2080a-pcie";
 			reg-names = "regs", "config";
 			interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "intr";
@@ -1085,7 +1183,7 @@
 			dma-coherent;
 			num-viewport = <6>;
 			bus-range = <0x0 0xff>;
-			msi-parent = <&its>;
+			msi-parent = <&its 0>;
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 7>;
 			interrupt-map = <0000 0 0 1 &gic 0 0 0 109 4>,
@@ -1097,7 +1195,7 @@
 		};
 
 		pcie2: pcie@3500000 {
-			compatible = "fsl,ls2080a-pcie", "fsl,ls2085a-pcie";
+			compatible = "fsl,ls2080a-pcie";
 			reg-names = "regs", "config";
 			interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "intr";
@@ -1107,7 +1205,7 @@
 			dma-coherent;
 			num-viewport = <6>;
 			bus-range = <0x0 0xff>;
-			msi-parent = <&its>;
+			msi-parent = <&its 0>;
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 7>;
 			interrupt-map = <0000 0 0 1 &gic 0 0 0 114 4>,
@@ -1119,7 +1217,7 @@
 		};
 
 		pcie3: pcie@3600000 {
-			compatible = "fsl,ls2080a-pcie", "fsl,ls2085a-pcie";
+			compatible = "fsl,ls2080a-pcie";
 			reg-names = "regs", "config";
 			interrupts = <GIC_SPI 118 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "intr";
@@ -1129,7 +1227,7 @@
 			dma-coherent;
 			num-viewport = <256>;
 			bus-range = <0x0 0xff>;
-			msi-parent = <&its>;
+			msi-parent = <&its 0>;
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 7>;
 			interrupt-map = <0000 0 0 1 &gic 0 0 0 119 4>,
@@ -1141,7 +1239,7 @@
 		};
 
 		pcie4: pcie@3700000 {
-			compatible = "fsl,ls2080a-pcie", "fsl,ls2085a-pcie";
+			compatible = "fsl,ls2080a-pcie";
 			reg-names = "regs", "config";
 			interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "intr";
@@ -1151,7 +1249,7 @@
 			dma-coherent;
 			num-viewport = <6>;
 			bus-range = <0x0 0xff>;
-			msi-parent = <&its>;
+			msi-parent = <&its 0>;
 			#interrupt-cells = <1>;
 			interrupt-map-mask = <0 0 0 7>;
 			interrupt-map = <0000 0 0 1 &gic 0 0 0 124 4>,
@@ -1218,7 +1316,7 @@
 			interrupts = <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
-		rcpm: power-controller@1e34040 {
+		rcpm: wakeup-controller@1e34040 {
 			compatible = "fsl,ls208xa-rcpm", "fsl,qoriq-rcpm-2.1+";
 			reg = <0x0 0x1e34040 0x0 0x18>;
 			#fsl,rcpm-wakeup-cells = <6>;

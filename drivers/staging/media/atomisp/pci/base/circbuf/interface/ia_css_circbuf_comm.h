@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _IA_CSS_CIRCBUF_COMM_H
@@ -33,7 +24,7 @@
  * Portable Data structures
  *
  ****************************************************************/
-/**
+/*
  * @brief Data structure for the circular descriptor.
  */
 typedef struct ia_css_circbuf_desc_s ia_css_circbuf_desc_t;
@@ -49,7 +40,7 @@ struct ia_css_circbuf_desc_s {
 
 static_assert(sizeof(struct ia_css_circbuf_desc_s) == SIZE_OF_IA_CSS_CIRCBUF_DESC_S_STRUCT);
 
-/**
+/*
  * @brief Data structure for the circular buffer element.
  */
 typedef struct ia_css_circbuf_elem_s ia_css_circbuf_elem_t;

@@ -7,11 +7,13 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/dmi.h>
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/suspend.h>
 #include "../dual_accel_detect.h"
@@ -66,6 +68,7 @@ static const struct key_entry intel_vbtn_switchmap[] = {
 };
 
 struct intel_vbtn_priv {
+	struct mutex mutex; /* Avoid notify_handler() racing with itself */
 	struct input_dev *buttons_dev;
 	struct input_dev *switches_dev;
 	bool dual_accel;
@@ -154,6 +157,8 @@ static void notify_handler(acpi_handle handle, u32 event, void *context)
 	struct input_dev *input_dev;
 	bool autorelease;
 	int ret;
+
+	guard(mutex)(&priv->mutex);
 
 	if ((ke = sparse_keymap_entry_from_scancode(priv->buttons_dev, event))) {
 		if (!priv->has_buttons) {
@@ -270,11 +275,15 @@ static bool intel_vbtn_has_switches(acpi_handle handle, bool dual_accel)
 
 static int intel_vbtn_probe(struct platform_device *device)
 {
-	acpi_handle handle = ACPI_HANDLE(&device->dev);
 	bool dual_accel, has_buttons, has_switches;
 	struct intel_vbtn_priv *priv;
+	acpi_handle handle;
 	acpi_status status;
 	int err;
+
+	handle = ACPI_HANDLE(&device->dev);
+	if (!handle)
+		return -ENODEV;
 
 	dual_accel = dual_accel_detect();
 	has_buttons = acpi_has_method(handle, "VBDL");
@@ -289,6 +298,10 @@ static int intel_vbtn_probe(struct platform_device *device)
 	if (!priv)
 		return -ENOMEM;
 	dev_set_drvdata(&device->dev, priv);
+
+	err = devm_mutex_init(&device->dev, &priv->mutex);
+	if (err)
+		return err;
 
 	priv->dual_accel = dual_accel;
 	priv->has_buttons = has_buttons;
@@ -378,35 +391,7 @@ static struct platform_driver intel_vbtn_pl_driver = {
 		.pm = &intel_vbtn_pm_ops,
 	},
 	.probe = intel_vbtn_probe,
-	.remove_new = intel_vbtn_remove,
+	.remove = intel_vbtn_remove,
 };
 
-static acpi_status __init
-check_acpi_dev(acpi_handle handle, u32 lvl, void *context, void **rv)
-{
-	const struct acpi_device_id *ids = context;
-	struct acpi_device *dev = acpi_fetch_acpi_dev(handle);
-
-	if (dev && acpi_match_device_ids(dev, ids) == 0)
-		if (!IS_ERR_OR_NULL(acpi_create_platform_device(dev, NULL)))
-			dev_info(&dev->dev,
-				 "intel-vbtn: created platform device\n");
-
-	return AE_OK;
-}
-
-static int __init intel_vbtn_init(void)
-{
-	acpi_walk_namespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT,
-			    ACPI_UINT32_MAX, check_acpi_dev, NULL,
-			    (void *)intel_vbtn_ids, NULL);
-
-	return platform_driver_register(&intel_vbtn_pl_driver);
-}
-module_init(intel_vbtn_init);
-
-static void __exit intel_vbtn_exit(void)
-{
-	platform_driver_unregister(&intel_vbtn_pl_driver);
-}
-module_exit(intel_vbtn_exit);
+module_platform_driver(intel_vbtn_pl_driver);

@@ -44,8 +44,10 @@ struct cpuinfo_arm64 {
 	u64		reg_dczid;
 	u64		reg_midr;
 	u64		reg_revidr;
+	u64		reg_aidr;
 	u64		reg_gmid;
 	u64		reg_smidr;
+	u64		reg_mpamidr;
 
 	u64		reg_id_aa64dfr0;
 	u64		reg_id_aa64dfr1;
@@ -76,5 +78,6 @@ void __init cpuinfo_store_boot_cpu(void);
 void __init init_cpu_features(struct cpuinfo_arm64 *info);
 void update_cpu_features(int cpu, struct cpuinfo_arm64 *info,
 				 struct cpuinfo_arm64 *boot);
+bool gmid_el1_accessible(const struct cpuinfo_arm64 *info);
 
 #endif /* __ASM_CPU_H */

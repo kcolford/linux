@@ -26,9 +26,7 @@ static bool is_ignored_symbol(const char *name, char type)
 		 * when --all-symbols is specified so exclude them to get a
 		 * stable symbol list.
 		 */
-		"kallsyms_addresses",
 		"kallsyms_offsets",
-		"kallsyms_relative_base",
 		"kallsyms_num_syms",
 		"kallsyms_names",
 		"kallsyms_markers",
@@ -132,7 +130,7 @@ static int test__vmlinux_matches_kallsyms_cb1(struct map *map, void *data)
 					(dso__kernel(dso) ? dso__short_name(dso) : dso__name(dso)));
 
 	if (pair) {
-		map__set_priv(pair, 1);
+		map__set_priv(pair);
 		map__put(pair);
 	} else {
 		if (!args->header_printed) {
@@ -167,7 +165,7 @@ static int test__vmlinux_matches_kallsyms_cb2(struct map *map, void *data)
 			pr_info(":\nWARN: *%" PRIx64 "-%" PRIx64 " %" PRIx64,
 				map__start(pair), map__end(pair), map__pgoff(pair));
 		pr_info(" %s\n", dso__name(dso));
-		map__set_priv(pair, 1);
+		map__set_priv(pair);
 	}
 	map__put(pair);
 	return 0;
@@ -194,7 +192,7 @@ static int test__vmlinux_matches_kallsyms(struct test_suite *test __maybe_unused
 	struct rb_node *nd;
 	struct symbol *sym;
 	struct map *kallsyms_map;
-	struct machine vmlinux;
+	struct machine vmlinux = { 0 };
 	struct maps *maps;
 	u64 mem_start, mem_end;
 	struct test__vmlinux_matches_kallsyms_cb_args args;
@@ -205,8 +203,10 @@ static int test__vmlinux_matches_kallsyms(struct test_suite *test __maybe_unused
 	 * Init the machines that will hold kernel, modules obtained from
 	 * both vmlinux + .ko files and from /proc/kallsyms split by modules.
 	 */
-	machine__init(&args.kallsyms, "", HOST_KERNEL_ID);
-	machine__init(&vmlinux, "", HOST_KERNEL_ID);
+	if (machine__init(&args.kallsyms, "", HOST_KERNEL_ID))
+		goto out;
+	if (machine__init(&vmlinux, "", HOST_KERNEL_ID))
+		goto out;
 
 	maps = machine__kernel_maps(&vmlinux);
 
@@ -348,7 +348,7 @@ next_pair:
 			 * such as __indirect_thunk_end.
 			 */
 			continue;
-		} else if (is_ignored_symbol(sym->name, sym->type)) {
+		} else if (is_ignored_symbol(sym->name, symbol__type(sym))) {
 			/*
 			 * Ignore hidden symbols, see scripts/kallsyms.c for the details
 			 */

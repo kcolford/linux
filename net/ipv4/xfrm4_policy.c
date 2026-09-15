@@ -14,50 +14,47 @@
 #include <linux/inetdevice.h>
 #include <net/dst.h>
 #include <net/xfrm.h>
+#include <net/flow.h>
 #include <net/ip.h>
 #include <net/l3mdev.h>
 
-static struct dst_entry *__xfrm4_dst_lookup(struct net *net, struct flowi4 *fl4,
-					    int tos, int oif,
-					    const xfrm_address_t *saddr,
-					    const xfrm_address_t *daddr,
-					    u32 mark)
+static struct dst_entry *__xfrm4_dst_lookup(struct flowi4 *fl4,
+					    const struct xfrm_dst_lookup_params *params)
 {
 	struct rtable *rt;
 
 	memset(fl4, 0, sizeof(*fl4));
-	fl4->daddr = daddr->a4;
-	fl4->flowi4_tos = tos;
-	fl4->flowi4_l3mdev = l3mdev_master_ifindex_by_index(net, oif);
-	fl4->flowi4_mark = mark;
-	if (saddr)
-		fl4->saddr = saddr->a4;
+	fl4->daddr = params->daddr->a4;
+	fl4->flowi4_dscp = params->dscp;
+	fl4->flowi4_l3mdev = l3mdev_master_ifindex_by_index(params->net,
+							    params->oif);
+	fl4->flowi4_mark = params->mark;
+	if (params->saddr)
+		fl4->saddr = params->saddr->a4;
+	fl4->flowi4_proto = params->ipproto;
+	fl4->uli = params->uli;
 
-	rt = __ip_route_output_key(net, fl4);
+	rt = __ip_route_output_key(params->net, fl4);
 	if (!IS_ERR(rt))
 		return &rt->dst;
 
 	return ERR_CAST(rt);
 }
 
-static struct dst_entry *xfrm4_dst_lookup(struct net *net, int tos, int oif,
-					  const xfrm_address_t *saddr,
-					  const xfrm_address_t *daddr,
-					  u32 mark)
+static struct dst_entry *xfrm4_dst_lookup(const struct xfrm_dst_lookup_params *params)
 {
 	struct flowi4 fl4;
 
-	return __xfrm4_dst_lookup(net, &fl4, tos, oif, saddr, daddr, mark);
+	return __xfrm4_dst_lookup(&fl4, params);
 }
 
-static int xfrm4_get_saddr(struct net *net, int oif,
-			   xfrm_address_t *saddr, xfrm_address_t *daddr,
-			   u32 mark)
+static int xfrm4_get_saddr(xfrm_address_t *saddr,
+			   const struct xfrm_dst_lookup_params *params)
 {
 	struct dst_entry *dst;
 	struct flowi4 fl4;
 
-	dst = __xfrm4_dst_lookup(net, &fl4, 0, oif, NULL, daddr, mark);
+	dst = __xfrm4_dst_lookup(&fl4, params);
 	if (IS_ERR(dst))
 		return -EHOSTUNREACH;
 
@@ -144,7 +141,7 @@ static const struct xfrm_policy_afinfo xfrm4_policy_afinfo = {
 };
 
 #ifdef CONFIG_SYSCTL
-static struct ctl_table xfrm4_policy_table[] = {
+static const struct ctl_table xfrm4_policy_table[] = {
 	{
 		.procname       = "xfrm4_gc_thresh",
 		.data           = &init_net.xfrm.xfrm4_dst_ops.gc_thresh,
@@ -154,18 +151,30 @@ static struct ctl_table xfrm4_policy_table[] = {
 	},
 };
 
-static __net_init int xfrm4_net_sysctl_init(struct net *net)
+static const struct ctl_table *xfrm4_policy_table_dup(struct net *net)
 {
 	struct ctl_table *table;
+
+	table = kmemdup(xfrm4_policy_table, sizeof(xfrm4_policy_table),
+			GFP_KERNEL);
+	if (!table)
+		return NULL;
+
+	table[0].data = &net->xfrm.xfrm4_dst_ops.gc_thresh;
+
+	return table;
+}
+
+static __net_init int xfrm4_net_sysctl_init(struct net *net)
+{
+	const struct ctl_table *table;
 	struct ctl_table_header *hdr;
 
 	table = xfrm4_policy_table;
 	if (!net_eq(net, &init_net)) {
-		table = kmemdup(table, sizeof(xfrm4_policy_table), GFP_KERNEL);
+		table = xfrm4_policy_table_dup(net);
 		if (!table)
 			goto err_alloc;
-
-		table[0].data = &net->xfrm.xfrm4_dst_ops.gc_thresh;
 	}
 
 	hdr = register_net_sysctl_sz(net, "net/ipv4", table,

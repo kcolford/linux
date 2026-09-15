@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/interconnect-provider.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -1714,7 +1713,7 @@ MODULE_DEVICE_TABLE(of, sdm660_noc_of_match);
 
 static struct platform_driver sdm660_noc_driver = {
 	.probe = qnoc_probe,
-	.remove_new = qnoc_remove,
+	.remove = qnoc_remove,
 	.driver = {
 		.name = "qnoc-sdm660",
 		.of_match_table = sdm660_noc_of_match,

@@ -54,21 +54,28 @@ static unsigned int bitbang_txrx_8(struct spi_device *spi,
 	struct spi_transfer	*t,
 	unsigned int flags)
 {
+	struct spi_bitbang	*bitbang;
 	unsigned int		bits = t->bits_per_word;
 	unsigned int		count = t->len;
 	const u8		*tx = t->tx_buf;
 	u8			*rx = t->rx_buf;
 
+	bitbang = spi_controller_get_devdata(spi->controller);
 	while (likely(count > 0)) {
 		u8		word = 0;
 
 		if (tx)
 			word = *tx++;
+		else
+			word = spi->mode & SPI_MOSI_IDLE_HIGH ? 0xFF : 0;
 		word = txrx_word(spi, ns, word, bits, flags);
 		if (rx)
 			*rx++ = word;
 		count -= 1;
 	}
+	if (bitbang->set_mosi_idle)
+		bitbang->set_mosi_idle(spi);
+
 	return t->len - count;
 }
 
@@ -78,21 +85,28 @@ static unsigned int bitbang_txrx_16(struct spi_device *spi,
 	struct spi_transfer	*t,
 	unsigned int flags)
 {
+	struct spi_bitbang	*bitbang;
 	unsigned int		bits = t->bits_per_word;
 	unsigned int		count = t->len;
 	const u16		*tx = t->tx_buf;
 	u16			*rx = t->rx_buf;
 
+	bitbang = spi_controller_get_devdata(spi->controller);
 	while (likely(count > 1)) {
 		u16		word = 0;
 
 		if (tx)
 			word = *tx++;
+		else
+			word = spi->mode & SPI_MOSI_IDLE_HIGH ? 0xFFFF : 0;
 		word = txrx_word(spi, ns, word, bits, flags);
 		if (rx)
 			*rx++ = word;
 		count -= 2;
 	}
+	if (bitbang->set_mosi_idle)
+		bitbang->set_mosi_idle(spi);
+
 	return t->len - count;
 }
 
@@ -102,21 +116,28 @@ static unsigned int bitbang_txrx_32(struct spi_device *spi,
 	struct spi_transfer	*t,
 	unsigned int flags)
 {
+	struct spi_bitbang	*bitbang;
 	unsigned int		bits = t->bits_per_word;
 	unsigned int		count = t->len;
 	const u32		*tx = t->tx_buf;
 	u32			*rx = t->rx_buf;
 
+	bitbang = spi_controller_get_devdata(spi->controller);
 	while (likely(count > 3)) {
 		u32		word = 0;
 
 		if (tx)
 			word = *tx++;
+		else
+			word = spi->mode & SPI_MOSI_IDLE_HIGH ? 0xFFFFFFFF : 0;
 		word = txrx_word(spi, ns, word, bits, flags);
 		if (rx)
 			*rx++ = word;
 		count -= 4;
 	}
+	if (bitbang->set_mosi_idle)
+		bitbang->set_mosi_idle(spi);
+
 	return t->len - count;
 }
 
@@ -172,7 +193,7 @@ int spi_bitbang_setup(struct spi_device *spi)
 	bitbang = spi_controller_get_devdata(spi->controller);
 
 	if (!cs) {
-		cs = kzalloc(sizeof(*cs), GFP_KERNEL);
+		cs = kzalloc_obj(*cs);
 		if (!cs)
 			return -ENOMEM;
 		spi->controller_state = cs;
@@ -191,6 +212,9 @@ int spi_bitbang_setup(struct spi_device *spi)
 		if (retval < 0)
 			goto err_free;
 	}
+
+	if (bitbang->set_mosi_idle)
+		bitbang->set_mosi_idle(spi);
 
 	dev_dbg(&spi->dev, "%s, %u nsec/bit\n", __func__, 2 * cs->nsecs);
 
@@ -396,11 +420,6 @@ EXPORT_SYMBOL_GPL(spi_bitbang_init);
  * This routine registers the spi_controller, which will process requests in a
  * dedicated task, keeping IRQs unblocked most of the time.  To stop
  * processing those requests, call spi_bitbang_stop().
- *
- * On success, this routine will take a reference to the controller. The caller
- * is responsible for calling spi_bitbang_stop() to decrement the reference and
- * spi_controller_put() as counterpart of spi_alloc_host() to prevent a memory
- * leak.
  */
 int spi_bitbang_start(struct spi_bitbang *bitbang)
 {
@@ -414,11 +433,7 @@ int spi_bitbang_start(struct spi_bitbang *bitbang)
 	/* driver may get busy before register() returns, especially
 	 * if someone registered boardinfo for devices
 	 */
-	ret = spi_register_controller(spi_controller_get(ctlr));
-	if (ret)
-		spi_controller_put(ctlr);
-
-	return ret;
+	return spi_register_controller(ctlr);
 }
 EXPORT_SYMBOL_GPL(spi_bitbang_start);
 

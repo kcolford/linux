@@ -10,7 +10,6 @@
 
 #include <linux/poll.h>
 #include <linux/fs.h>
-#include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
 #include <linux/kthread.h>
@@ -66,6 +65,8 @@ struct cec_data {
 	struct list_head xfer_list;
 	struct cec_adapter *adap;
 	struct cec_msg msg;
+	u8 match_len;
+	u8 match_reply[5];
 	struct cec_fh *fh;
 	struct delayed_work work;
 	struct completion c;
@@ -84,7 +85,6 @@ struct cec_event_entry {
 	struct cec_event	ev;
 };
 
-#define CEC_NUM_CORE_EVENTS 2
 #define CEC_NUM_EVENTS CEC_EVENT_PIN_5V_HIGH
 
 struct cec_fh {
@@ -100,7 +100,6 @@ struct cec_fh {
 	struct list_head	events[CEC_NUM_EVENTS]; /* queued events */
 	u16			queued_events[CEC_NUM_EVENTS];
 	unsigned int		total_queued_events;
-	struct cec_event_entry	core_events[CEC_NUM_CORE_EVENTS];
 	struct list_head	msgs; /* queued messages */
 	unsigned int		queued_msgs;
 };
@@ -222,6 +221,8 @@ struct cec_adap_ops {
  * @tx_error_log_cnt:	number of logged Error transmits since the adapter was
  *                      enabled. Used to avoid flooding the kernel log if this
  *                      happens a lot.
+ * @error_inj_tx_timeouts: error injection: the next @error_inj_tx_timeouts
+ *			transmits will time out.
  * @notifier:		CEC notifier
  * @pin:		CEC pin status struct
  * @cec_dir:		debugfs cec directory
@@ -282,6 +283,8 @@ struct cec_adapter {
 	u32 tx_low_drive_log_cnt;
 	u32 tx_error_log_cnt;
 
+	u32 error_inj_tx_timeouts;
+
 #ifdef CONFIG_CEC_NOTIFIER
 	struct cec_notifier *notifier;
 #endif
@@ -295,6 +298,37 @@ struct cec_adapter {
 
 	char input_phys[40];
 };
+
+static inline int cec_get_device(struct cec_adapter *adap)
+{
+	struct cec_devnode *devnode = &adap->devnode;
+
+	/*
+	 * Check if the cec device is available. This needs to be done with
+	 * the devnode->lock held to prevent an open/unregister race:
+	 * without the lock, the device could be unregistered and freed between
+	 * the devnode->registered check and get_device() calls, leading to
+	 * a crash.
+	 */
+	mutex_lock(&devnode->lock);
+	/*
+	 * return ENODEV if the cec device has been removed
+	 * already or if it is not registered anymore.
+	 */
+	if (!devnode->registered) {
+		mutex_unlock(&devnode->lock);
+		return -ENODEV;
+	}
+	/* and increase the device refcount */
+	get_device(&devnode->dev);
+	mutex_unlock(&devnode->lock);
+	return 0;
+}
+
+static inline void cec_put_device(struct cec_adapter *adap)
+{
+	put_device(&adap->devnode.dev);
+}
 
 static inline void *cec_get_drvdata(const struct cec_adapter *adap)
 {

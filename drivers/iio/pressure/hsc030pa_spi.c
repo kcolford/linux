@@ -10,7 +10,6 @@
 
 #include <linux/delay.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/stddef.h>
@@ -35,13 +34,13 @@ static int hsc_spi_probe(struct spi_device *spi)
 
 static const struct of_device_id hsc_spi_match[] = {
 	{ .compatible = "honeywell,hsc030pa" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, hsc_spi_match);
 
 static const struct spi_device_id hsc_spi_id[] = {
-	{ "hsc030pa" },
-	{}
+	{ .name = "hsc030pa" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, hsc_spi_id);
 
@@ -58,4 +57,4 @@ module_spi_driver(hsc_spi_driver);
 MODULE_AUTHOR("Petre Rodan <petre.rodan@subdimension.ro>");
 MODULE_DESCRIPTION("Honeywell HSC and SSC pressure sensor spi driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_HONEYWELL_HSC030PA);
+MODULE_IMPORT_NS("IIO_HONEYWELL_HSC030PA");

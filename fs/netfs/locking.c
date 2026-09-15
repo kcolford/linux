@@ -9,6 +9,11 @@
 #include <linux/netfs.h>
 #include "internal.h"
 
+struct netfs_wb_waiter {
+	struct list_head	link;		/* Link in ictx->wb_queue */
+	struct task_struct	*waiter;	/* Waiter task; cleared when lock granted */
+};
+
 /*
  * inode_dio_wait_interruptible - wait for outstanding DIO requests to finish
  * @inode: inode to wait for
@@ -19,25 +24,13 @@
  * Must be called under a lock that serializes taking new references
  * to i_dio_count, usually by inode->i_mutex.
  */
-static int inode_dio_wait_interruptible(struct inode *inode)
+static int netfs_inode_dio_wait_interruptible(struct inode *inode)
 {
-	if (!atomic_read(&inode->i_dio_count))
+	if (inode_dio_finished(inode))
 		return 0;
 
-	wait_queue_head_t *wq = bit_waitqueue(&inode->i_state, __I_DIO_WAKEUP);
-	DEFINE_WAIT_BIT(q, &inode->i_state, __I_DIO_WAKEUP);
-
-	for (;;) {
-		prepare_to_wait(wq, &q.wq_entry, TASK_INTERRUPTIBLE);
-		if (!atomic_read(&inode->i_dio_count))
-			break;
-		if (signal_pending(current))
-			break;
-		schedule();
-	}
-	finish_wait(wq, &q.wq_entry);
-
-	return atomic_read(&inode->i_dio_count) ? -ERESTARTSYS : 0;
+	inode_dio_wait_interruptible(inode);
+	return !inode_dio_finished(inode) ? -ERESTARTSYS : 0;
 }
 
 /* Call with exclusively locked inode->i_rwsem */
@@ -46,7 +39,7 @@ static int netfs_block_o_direct(struct netfs_inode *ictx)
 	if (!test_bit(NETFS_ICTX_ODIRECT, &ictx->flags))
 		return 0;
 	clear_bit(NETFS_ICTX_ODIRECT, &ictx->flags);
-	return inode_dio_wait_interruptible(&ictx->inode);
+	return netfs_inode_dio_wait_interruptible(&ictx->inode);
 }
 
 /**
@@ -121,6 +114,7 @@ int netfs_start_io_write(struct inode *inode)
 		up_write(&inode->i_rwsem);
 		return -ERESTARTSYS;
 	}
+	downgrade_write(&inode->i_rwsem);
 	return 0;
 }
 EXPORT_SYMBOL(netfs_start_io_write);
@@ -135,7 +129,7 @@ EXPORT_SYMBOL(netfs_start_io_write);
 void netfs_end_io_write(struct inode *inode)
 	__releases(inode->i_rwsem)
 {
-	up_write(&inode->i_rwsem);
+	up_read(&inode->i_rwsem);
 }
 EXPORT_SYMBOL(netfs_end_io_write);
 
@@ -214,3 +208,93 @@ void netfs_end_io_direct(struct inode *inode)
 	up_read(&inode->i_rwsem);
 }
 EXPORT_SYMBOL(netfs_end_io_direct);
+
+/*
+ * Wait to have exclusive access to writeback.
+ */
+static bool netfs_wb_begin_wait(struct netfs_inode *ictx)
+{
+	struct netfs_wb_waiter waiter = {};
+	struct task_struct *tsk = current;
+	bool got = false;
+
+	spin_lock(&ictx->lock);
+
+	if (test_and_set_bit_lock(NETFS_ICTX_WB_LOCK, &ictx->flags)) {
+		get_task_struct(tsk);
+		waiter.waiter = tsk;
+		list_add_tail(&waiter.link, &ictx->wb_queue);
+	} else {
+		got = true;
+	}
+	spin_unlock(&ictx->lock);
+
+	if (!got) {
+		for (;;) {
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			/* Read waiter before accessing inode state. */
+			if (smp_load_acquire(&waiter.waiter) == NULL)
+				break;
+			schedule();
+		}
+	}
+	__set_current_state(TASK_RUNNING);
+	return true;
+}
+
+/**
+ * netfs_wb_begin - Begin writeback, waiting if need be
+ * @ictx: The inode to get writeback access on
+ * @nowait: Return failure immediately rather than waiting if true
+ *
+ * Begin writeback to an inode, waiting for exclusive access if @nowait is
+ * false.  This prevents collection from being done out of order with respect
+ * to the issuance of write subrequests.
+ *
+ * Note that writeback may be ended in a different process (e.g. the collection
+ * function on a workqueue) than started it.
+ *
+ * Return: True if can proceed, false if denied.
+ */
+bool netfs_wb_begin(struct netfs_inode *ictx, bool nowait)
+{
+	if (!test_and_set_bit_lock(NETFS_ICTX_WB_LOCK, &ictx->flags))
+		return true;
+	if (nowait) {
+		netfs_stat(&netfs_n_wb_lock_skip);
+		return false;
+	}
+	netfs_stat(&netfs_n_wb_lock_wait);
+	return netfs_wb_begin_wait(ictx);
+}
+EXPORT_SYMBOL(netfs_wb_begin);
+
+/* netfs_wb_end - End writeback
+ * @ictx: The inode we have writeback access to
+ *
+ * End writeback access on an inode, waking up the next writeback request.
+ */
+void netfs_wb_end(struct netfs_inode *ictx)
+{
+	struct netfs_wb_waiter *waiter;
+	struct task_struct *tsk;
+
+	WARN_ON_ONCE(!test_bit(NETFS_ICTX_WB_LOCK, &ictx->flags));
+
+	spin_lock(&ictx->lock);
+
+	waiter = list_first_entry_or_null(&ictx->wb_queue, struct netfs_wb_waiter, link);
+	if (waiter) {
+		list_del(&waiter->link);
+		tsk = waiter->waiter;
+		/* Write inode state before clearing waiter. */
+		smp_store_release(&waiter->waiter, NULL);
+		wake_up_process(tsk);
+		put_task_struct(tsk);
+	} else {
+		clear_bit_unlock(NETFS_ICTX_WB_LOCK, &ictx->flags);
+	}
+
+	spin_unlock(&ictx->lock);
+}
+EXPORT_SYMBOL(netfs_wb_end);

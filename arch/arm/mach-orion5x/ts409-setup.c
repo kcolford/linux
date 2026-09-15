@@ -7,7 +7,7 @@
  * Copyright (C) 2008  Sylver Bruneau <sylver.bruneau@gmail.com>
  * Copyright (C) 2008  Martin Michlmayr <tbm@cyrius.com>
  */
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/gpio/machine.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -312,7 +312,7 @@ static void __init qnap_ts409_init(void)
 	platform_device_register(&ts409_leds);
 
 	/* register tsx09 specific power-off method */
-	pm_power_off = qnap_tsx09_power_off;
+	register_platform_power_off(qnap_tsx09_power_off);
 }
 
 MACHINE_START(TS409, "QNAP TS-409")

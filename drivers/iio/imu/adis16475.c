@@ -20,7 +20,6 @@
 #include <linux/lcm.h>
 #include <linux/math.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/spi/spi.h>
 
@@ -164,7 +163,6 @@ module_param(low_rate_allow, bool, 0444);
 MODULE_PARM_DESC(low_rate_allow,
 		 "Allow IMU rates below the minimum advisable when external clk is used in SCALED mode (default: N)");
 
-#ifdef CONFIG_DEBUG_FS
 static ssize_t adis16475_show_firmware_revision(struct file *file,
 						char __user *userbuf,
 						size_t count, loff_t *ppos)
@@ -279,6 +277,9 @@ static void adis16475_debugfs_init(struct iio_dev *indio_dev)
 	struct adis16475 *st = iio_priv(indio_dev);
 	struct dentry *d = iio_get_debugfs_dentry(indio_dev);
 
+	if (!IS_ENABLED(CONFIG_DEBUG_FS))
+		return;
+
 	debugfs_create_file_unsafe("serial_number", 0400,
 				   d, st, &adis16475_serial_number_fops);
 	debugfs_create_file_unsafe("product_id", 0400,
@@ -290,11 +291,6 @@ static void adis16475_debugfs_init(struct iio_dev *indio_dev)
 	debugfs_create_file("firmware_date", 0400, d,
 			    st, &adis16475_firmware_date_fops);
 }
-#else
-static void adis16475_debugfs_init(struct iio_dev *indio_dev)
-{
-}
-#endif
 
 static int adis16475_get_freq(struct adis16475 *st, u32 *freq)
 {
@@ -1593,8 +1589,7 @@ static int adis16475_push_single_sample(struct iio_poll_func *pf)
 		return -EINVAL;
 	}
 
-	for_each_set_bit(bit, indio_dev->active_scan_mask,
-			 indio_dev->masklength) {
+	iio_for_each_active_channel(indio_dev, bit) {
 		/*
 		 * When burst mode is used, system flags is the first data
 		 * channel in the sequence, but the scan index is 7.
@@ -1934,7 +1929,6 @@ static int adis16475_config_irq_pin(struct adis16475 *st)
 	return 0;
 }
 
-
 static int adis16475_probe(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev;
@@ -2062,38 +2056,38 @@ static const struct of_device_id adis16475_of_match[] = {
 		.data = &adis16475_chip_info[ADIS16577_2] },
 	{ .compatible = "adi,adis16577-3",
 		.data = &adis16475_chip_info[ADIS16577_3] },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, adis16475_of_match);
 
 static const struct spi_device_id adis16475_ids[] = {
-	{ "adis16470", (kernel_ulong_t)&adis16475_chip_info[ADIS16470] },
-	{ "adis16475-1", (kernel_ulong_t)&adis16475_chip_info[ADIS16475_1] },
-	{ "adis16475-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16475_2] },
-	{ "adis16475-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16475_3] },
-	{ "adis16477-1", (kernel_ulong_t)&adis16475_chip_info[ADIS16477_1] },
-	{ "adis16477-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16477_2] },
-	{ "adis16477-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16477_3] },
-	{ "adis16465-1", (kernel_ulong_t)&adis16475_chip_info[ADIS16465_1] },
-	{ "adis16465-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16465_2] },
-	{ "adis16465-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16465_3] },
-	{ "adis16467-1", (kernel_ulong_t)&adis16475_chip_info[ADIS16467_1] },
-	{ "adis16467-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16467_2] },
-	{ "adis16467-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16467_3] },
-	{ "adis16500", (kernel_ulong_t)&adis16475_chip_info[ADIS16500] },
-	{ "adis16501", (kernel_ulong_t)&adis16475_chip_info[ADIS16501] },
-	{ "adis16505-1", (kernel_ulong_t)&adis16475_chip_info[ADIS16505_1] },
-	{ "adis16505-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16505_2] },
-	{ "adis16505-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16505_3] },
-	{ "adis16507-1", (kernel_ulong_t)&adis16475_chip_info[ADIS16507_1] },
-	{ "adis16507-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16507_2] },
-	{ "adis16507-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16507_3] },
-	{ "adis16575-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16575_2] },
-	{ "adis16575-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16575_3] },
-	{ "adis16576-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16576_2] },
-	{ "adis16576-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16576_3] },
-	{ "adis16577-2", (kernel_ulong_t)&adis16475_chip_info[ADIS16577_2] },
-	{ "adis16577-3", (kernel_ulong_t)&adis16475_chip_info[ADIS16577_3] },
+	{ .name = "adis16470", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16470] },
+	{ .name = "adis16475-1", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16475_1] },
+	{ .name = "adis16475-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16475_2] },
+	{ .name = "adis16475-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16475_3] },
+	{ .name = "adis16477-1", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16477_1] },
+	{ .name = "adis16477-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16477_2] },
+	{ .name = "adis16477-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16477_3] },
+	{ .name = "adis16465-1", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16465_1] },
+	{ .name = "adis16465-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16465_2] },
+	{ .name = "adis16465-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16465_3] },
+	{ .name = "adis16467-1", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16467_1] },
+	{ .name = "adis16467-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16467_2] },
+	{ .name = "adis16467-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16467_3] },
+	{ .name = "adis16500", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16500] },
+	{ .name = "adis16501", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16501] },
+	{ .name = "adis16505-1", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16505_1] },
+	{ .name = "adis16505-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16505_2] },
+	{ .name = "adis16505-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16505_3] },
+	{ .name = "adis16507-1", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16507_1] },
+	{ .name = "adis16507-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16507_2] },
+	{ .name = "adis16507-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16507_3] },
+	{ .name = "adis16575-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16575_2] },
+	{ .name = "adis16575-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16575_3] },
+	{ .name = "adis16576-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16576_2] },
+	{ .name = "adis16576-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16576_3] },
+	{ .name = "adis16577-2", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16577_2] },
+	{ .name = "adis16577-3", .driver_data = (kernel_ulong_t)&adis16475_chip_info[ADIS16577_3] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, adis16475_ids);
@@ -2111,4 +2105,4 @@ module_spi_driver(adis16475_driver);
 MODULE_AUTHOR("Nuno Sa <nuno.sa@analog.com>");
 MODULE_DESCRIPTION("Analog Devices ADIS16475 IMU driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_ADISLIB);
+MODULE_IMPORT_NS("IIO_ADISLIB");

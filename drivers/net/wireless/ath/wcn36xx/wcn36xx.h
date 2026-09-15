@@ -167,7 +167,7 @@ struct wcn36xx_vif {
  * @dpu_desc_index: DPU descriptor index is returned from HW after config_sta
  * call and is used in TX BD.
  * @bss_sta_index: STA index is returned from HW after config_bss call and is
- * used in both SMD channel and TX BD. See table bellow when it is used.
+ * used in both SMD channel and TX BD. See table below when it is used.
  * @bss_dpu_desc_index: DPU descriptor index is returned from HW after
  * config_bss call and is used in TX BD.
  * ______________________________________________
@@ -298,7 +298,7 @@ struct wcn36xx {
 	struct ieee80211_channel *channel;
 
 	spinlock_t survey_lock;		/* protects chan_survey */
-	struct wcn36xx_chan_survey	*chan_survey;
+	struct wcn36xx_chan_survey	chan_survey[];
 };
 
 static inline bool wcn36xx_is_fw_version(struct wcn36xx *wcn,

@@ -812,7 +812,7 @@ static int brcmuart_handle_irq(struct uart_port *p)
 			/*
 			 * if Receive Data Interrupt is enabled and
 			 * we're uing hardware flow control, deassert
-			 * RTS and wait for any chars in the pipline to
+			 * RTS and wait for any chars in the pipeline to
 			 * arrive and then check for DR again.
 			 */
 			if ((ier & UART_IER_RDI) && (up->mcr & UART_MCR_AFE)) {
@@ -1056,8 +1056,7 @@ static int brcmuart_probe(struct platform_device *pdev)
 	}
 
 	/* setup HR timer */
-	hrtimer_init(&priv->hrt, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	priv->hrt.function = brcmuart_hrtimer_func;
+	hrtimer_setup(&priv->hrt, brcmuart_hrtimer_func, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
 	up.port.shutdown = brcmuart_shutdown;
 	up.port.startup = brcmuart_startup;
@@ -1100,10 +1099,8 @@ static int brcmuart_probe(struct platform_device *pdev)
 		}
 		ret = devm_request_irq(dev, dma_irq, brcmuart_isr,
 				IRQF_SHARED, "uart DMA irq", &new_port->port);
-		if (ret) {
-			dev_err_probe(dev, ret, "unable to register IRQ handler\n");
+		if (ret)
 			goto err1;
-		}
 	}
 	platform_set_drvdata(pdev, priv);
 	brcmuart_init_debugfs(priv, dev_name(&pdev->dev));
@@ -1204,7 +1201,7 @@ static struct platform_driver brcmuart_platform_driver = {
 		.of_match_table = brcmuart_dt_ids,
 	},
 	.probe		= brcmuart_probe,
-	.remove_new	= brcmuart_remove,
+	.remove		= brcmuart_remove,
 };
 
 static int __init brcmuart_init(void)

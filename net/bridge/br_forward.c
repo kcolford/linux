@@ -24,8 +24,8 @@ static inline int should_deliver(const struct net_bridge_port *p,
 	struct net_bridge_vlan_group *vg;
 
 	vg = nbp_vlan_group_rcu(p);
-	return ((p->flags & BR_HAIRPIN_MODE) || skb->dev != p->dev) &&
-		(br_mst_is_enabled(p->br) || p->state == BR_STATE_FORWARDING) &&
+	return (test_bit(BR_HAIRPIN_MODE_BIT, &p->flags) || skb->dev != p->dev) &&
+		(br_mst_is_enabled(p) || p->state == BR_STATE_FORWARDING) &&
 		br_allowed_egress(vg, skb) && nbp_switchdev_allowed_egress(p, skb) &&
 		!br_skb_isolated(p, skb);
 }
@@ -148,7 +148,8 @@ void br_forward(const struct net_bridge_port *to,
 		goto out;
 
 	/* redirect to backup link if the destination port is down */
-	if (rcu_access_pointer(to->backup_port) && !netif_carrier_ok(to->dev)) {
+	if (rcu_access_pointer(to->backup_port) &&
+	    (!netif_carrier_ok(to->dev) || !netif_running(to->dev))) {
 		struct net_bridge_port *backup_port;
 
 		backup_port = rcu_dereference(to->backup_port);
@@ -201,6 +202,7 @@ void br_flood(struct net_bridge *br, struct sk_buff *skb,
 	      enum br_pkt_type pkt_type, bool local_rcv, bool local_orig,
 	      u16 vid)
 {
+	enum skb_drop_reason reason = SKB_DROP_REASON_NO_TX_TARGET;
 	struct net_bridge_port *prev = NULL;
 	struct net_bridge_port *p;
 
@@ -212,30 +214,40 @@ void br_flood(struct net_bridge *br, struct sk_buff *skb,
 		 */
 		switch (pkt_type) {
 		case BR_PKT_UNICAST:
-			if (!(p->flags & BR_FLOOD))
+			if (!test_bit(BR_FLOOD_BIT, &p->flags))
 				continue;
 			break;
 		case BR_PKT_MULTICAST:
-			if (!(p->flags & BR_MCAST_FLOOD) && skb->dev != br->dev)
+			if (!test_bit(BR_MCAST_FLOOD_BIT, &p->flags) && skb->dev != br->dev)
 				continue;
 			break;
 		case BR_PKT_BROADCAST:
-			if (!(p->flags & BR_BCAST_FLOOD) && skb->dev != br->dev)
+			if (!test_bit(BR_BCAST_FLOOD_BIT, &p->flags) && skb->dev != br->dev)
 				continue;
 			break;
 		}
 
 		/* Do not flood to ports that enable proxy ARP */
-		if (p->flags & BR_PROXYARP)
+		if (test_bit(BR_PROXYARP_BIT, &p->flags))
 			continue;
-		if (BR_INPUT_SKB_CB(skb)->proxyarp_replied &&
-		    ((p->flags & BR_PROXYARP_WIFI) ||
-		     br_is_neigh_suppress_enabled(p, vid)))
-			continue;
+		if (BR_INPUT_SKB_CB(skb)->proxyarp_replied) {
+			if (test_bit(BR_PROXYARP_WIFI_BIT, &p->flags))
+				continue;
+			/* For gratuitous ARPs/NAs, check neigh_forward_grat.
+			 * For regular ARPs/NDs, check only neigh_suppress.
+			 */
+			if (br_is_neigh_suppress_enabled(p, vid) &&
+			    (!BR_INPUT_SKB_CB(skb)->grat_arp ||
+			     !br_is_neigh_forward_grat_enabled(p, vid)))
+				continue;
+		}
 
 		prev = maybe_deliver(prev, p, skb, local_orig);
-		if (IS_ERR(prev))
+		if (IS_ERR(prev)) {
+			reason = PTR_ERR(prev) == -ENOMEM ? SKB_DROP_REASON_NOMEM :
+				 SKB_DROP_REASON_NOT_SPECIFIED;
 			goto out;
+		}
 	}
 
 	if (!prev)
@@ -249,7 +261,7 @@ void br_flood(struct net_bridge *br, struct sk_buff *skb,
 
 out:
 	if (!local_rcv)
-		kfree_skb(skb);
+		kfree_skb_reason(skb, reason);
 }
 
 #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
@@ -289,6 +301,7 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 			struct net_bridge_mcast *brmctx,
 			bool local_rcv, bool local_orig)
 {
+	enum skb_drop_reason reason = SKB_DROP_REASON_NO_TX_TARGET;
 	struct net_bridge_port *prev = NULL;
 	struct net_bridge_port_group *p;
 	bool allow_mode_include = true;
@@ -315,7 +328,8 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 		if ((unsigned long)lport > (unsigned long)rport) {
 			port = lport;
 
-			if (port->flags & BR_MULTICAST_TO_UNICAST) {
+			if (test_bit(BR_MULTICAST_TO_UNICAST_BIT,
+				     &port->flags)) {
 				maybe_deliver_addr(lport, skb, p->eth_addr,
 						   local_orig);
 				goto delivered;
@@ -329,8 +343,11 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 		}
 
 		prev = maybe_deliver(prev, port, skb, local_orig);
-		if (IS_ERR(prev))
+		if (IS_ERR(prev)) {
+			reason = PTR_ERR(prev) == -ENOMEM ? SKB_DROP_REASON_NOMEM :
+				 SKB_DROP_REASON_NOT_SPECIFIED;
 			goto out;
+		}
 delivered:
 		if ((unsigned long)lport >= (unsigned long)port)
 			p = rcu_dereference(p->next);
@@ -349,6 +366,6 @@ delivered:
 
 out:
 	if (!local_rcv)
-		kfree_skb(skb);
+		kfree_skb_reason(skb, reason);
 }
 #endif

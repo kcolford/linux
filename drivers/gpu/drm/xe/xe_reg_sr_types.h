@@ -3,8 +3,8 @@
  * Copyright © 2022 Intel Corporation
  */
 
-#ifndef _XE_REG_SR_TYPES_
-#define _XE_REG_SR_TYPES_
+#ifndef _XE_REG_SR_TYPES_H_
+#define _XE_REG_SR_TYPES_H_
 
 #include <linux/types.h>
 #include <linux/xarray.h>
@@ -20,12 +20,6 @@ struct xe_reg_sr_entry {
 };
 
 struct xe_reg_sr {
-	struct {
-		struct xe_reg_sr_entry *arr;
-		unsigned int used;
-		unsigned int allocated;
-		unsigned int grow_step;
-	} pool;
 	struct xarray xa;
 	const char *name;
 

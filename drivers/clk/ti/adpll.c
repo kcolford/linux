@@ -483,7 +483,7 @@ static const struct clk_ops ti_adpll_ops = {
 
 static int ti_adpll_init_dco(struct ti_adpll_data *d)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk *clock;
 	const char *postfix;
 	int width, err;
@@ -576,7 +576,7 @@ static int ti_adpll_init_clkout(struct ti_adpll_data *d,
 				struct clk *clk1)
 {
 	struct ti_adpll_clkout_data *co;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_ops *ops;
 	const char *parent_names[2];
 	const char *child_name;
@@ -934,7 +934,7 @@ static struct platform_driver ti_adpll_driver = {
 		.of_match_table = ti_adpll_match,
 	},
 	.probe = ti_adpll_probe,
-	.remove_new = ti_adpll_remove,
+	.remove = ti_adpll_remove,
 };
 
 static int __init ti_adpll_init(void)

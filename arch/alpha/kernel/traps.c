@@ -22,13 +22,19 @@
 
 #include <asm/gentrap.h>
 #include <linux/uaccess.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <asm/sysinfo.h>
 #include <asm/hwrpb.h>
 #include <asm/mmu_context.h>
 #include <asm/special_insns.h>
 
 #include "proto.h"
+
+static __always_inline void alpha_snapshot_usp(struct pt_regs *regs)
+{
+	if (user_mode(regs))
+		regs->usp = rdusp();
+}
 
 void
 dik_show_regs(struct pt_regs *regs, unsigned long *r9_15)
@@ -166,12 +172,12 @@ static long dummy_emul(void) { return 0; }
 long (*alpha_fp_emul_imprecise)(struct pt_regs *regs, unsigned long writemask)
   = (void *)dummy_emul;
 EXPORT_SYMBOL_GPL(alpha_fp_emul_imprecise);
-long (*alpha_fp_emul) (unsigned long pc)
+long (*alpha_fp_emul) (unsigned long pc, unsigned long summary)
   = (void *)dummy_emul;
 EXPORT_SYMBOL_GPL(alpha_fp_emul);
 #else
 long alpha_fp_emul_imprecise(struct pt_regs *regs, unsigned long writemask);
-long alpha_fp_emul (unsigned long pc);
+long alpha_fp_emul (unsigned long pc, unsigned long summary);
 #endif
 
 asmlinkage void
@@ -180,12 +186,13 @@ do_entArith(unsigned long summary, unsigned long write_mask,
 {
 	long si_code = FPE_FLTINV;
 
+	alpha_snapshot_usp(regs);
 	if (summary & 1) {
 		/* Software-completion summary bit is set, so try to
 		   emulate the instruction.  If the processor supports
 		   precise exceptions, we don't have to search.  */
 		if (!amask(AMASK_PRECISE_TRAP))
-			si_code = alpha_fp_emul(regs->pc - 4);
+			si_code = alpha_fp_emul(regs->pc - 4, summary);
 		else
 			si_code = alpha_fp_emul_imprecise(regs, write_mask);
 		if (si_code == 0)
@@ -201,6 +208,7 @@ do_entIF(unsigned long type, struct pt_regs *regs)
 {
 	int signo, code;
 
+	alpha_snapshot_usp(regs);
 	if (type == 3) { /* FEN fault */
 		/* Irritating users can call PAL_clrfen to disable the
 		   FPU for the process.  The kernel will then trap in
@@ -649,7 +657,7 @@ s_reg_to_mem (unsigned long s_reg)
 static int unauser_reg_offsets[32] = {
 	R(r0), R(r1), R(r2), R(r3), R(r4), R(r5), R(r6), R(r7), R(r8),
 	/* r9 ... r15 are stored in front of regs.  */
-	-56, -48, -40, -32, -24, -16, -8,
+	-64, -56, -48, -40, -32, -24, -16,	/* padding at -8 */
 	R(r16), R(r17), R(r18),
 	R(r19), R(r20), R(r21), R(r22), R(r23), R(r24), R(r25), R(r26),
 	R(r27), R(r28), R(gp),
@@ -917,7 +925,9 @@ void
 trap_init(void)
 {
 	/* Tell PAL-code what global pointer we want in the kernel.  */
-	register unsigned long gptr __asm__("$29");
+	unsigned long gptr;
+
+	__asm__ __volatile__("mov $29, %0" : "=r" (gptr));
 	wrkgp(gptr);
 
 	wrent(entArith, 1);

@@ -307,7 +307,7 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 	if (otg_sx->role_sw_used || otg_sx->manual_drd_enabled)
 		goto out;
 
-	if (of_property_read_bool(node, "extcon")) {
+	if (of_property_present(node, "extcon")) {
 		otg_sx->edev = extcon_get_edev_by_phandle(ssusb->dev, 0);
 		if (IS_ERR(otg_sx->edev)) {
 			return dev_err_probe(dev, PTR_ERR(otg_sx->edev),
@@ -431,7 +431,6 @@ static int mtu3_probe(struct platform_device *pdev)
 	}
 
 	device_enable_async_suspend(dev);
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 	pm_runtime_forbid(dev);
 
@@ -545,7 +544,8 @@ static int mtu3_suspend_common(struct device *dev, pm_message_t msg)
 
 	ssusb_phy_power_off(ssusb);
 	clk_bulk_disable_unprepare(BULK_CLKS_CNT, ssusb->clks);
-	ssusb_wakeup_set(ssusb, true);
+	if (device_may_wakeup(dev) && (ssusb->is_host || PMSG_IS_AUTO(msg)))
+		ssusb_wakeup_set(ssusb, true);
 	return 0;
 
 sleep_err:
@@ -621,7 +621,7 @@ MODULE_DEVICE_TABLE(of, mtu3_of_match);
 
 static struct platform_driver mtu3_driver = {
 	.probe = mtu3_probe,
-	.remove_new = mtu3_remove,
+	.remove = mtu3_remove,
 	.driver = {
 		.name = MTU3_DRIVER_NAME,
 		.pm = DEV_PM_OPS,

@@ -235,10 +235,8 @@ static int highbank_mc_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	res = devm_request_irq(&pdev->dev, irq, highbank_mc_err_handler,
 			       0, dev_name(&pdev->dev), mci);
-	if (res < 0) {
-		dev_err(&pdev->dev, "Unable to request irq %d\n", irq);
+	if (res < 0)
 		goto err2;
-	}
 
 	devres_close_group(&pdev->dev, NULL);
 	return 0;
@@ -261,7 +259,7 @@ static void highbank_mc_remove(struct platform_device *pdev)
 
 static struct platform_driver highbank_mc_edac_driver = {
 	.probe = highbank_mc_probe,
-	.remove_new = highbank_mc_remove,
+	.remove = highbank_mc_remove,
 	.driver = {
 		.name = "hb_mc_edac",
 		.of_match_table = hb_ddr_ctrl_of_match,

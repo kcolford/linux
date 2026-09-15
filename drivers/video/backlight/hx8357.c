@@ -8,7 +8,6 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/lcd.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/spi/spi.h>
@@ -532,7 +531,7 @@ static int hx8369_lcd_init(struct lcd_device *lcdev)
 	return 0;
 }
 
-#define POWER_IS_ON(pwr)	((pwr) <= FB_BLANK_NORMAL)
+#define POWER_IS_ON(pwr)	((pwr) <= LCD_POWER_REDUCED)
 
 static int hx8357_set_power(struct lcd_device *lcdev, int power)
 {

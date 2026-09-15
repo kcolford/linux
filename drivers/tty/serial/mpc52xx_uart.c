@@ -645,6 +645,8 @@ static irqreturn_t mpc512x_psc_handle_irq(struct uart_port *port)
 
 	/* Check if it is an interrupt for this port */
 	psc_num = (port->mapbase & 0xf00) >> 8;
+	if (psc_num >= ARRAY_SIZE(psc_mclk_clk))
+		return IRQ_NONE;
 	if (test_bit(psc_num, &fifoc_int) ||
 	    test_bit(psc_num + 16, &fifoc_int))
 		return mpc5xxx_uart_process_int(port);
@@ -663,6 +665,8 @@ static int mpc512x_psc_alloc_clock(struct uart_port *port)
 	int err;
 
 	psc_num = (port->mapbase & 0xf00) >> 8;
+	if (psc_num >= ARRAY_SIZE(psc_mclk_clk))
+		return -EINVAL;
 
 	clk = devm_clk_get(port->dev, "mclk");
 	if (IS_ERR(clk)) {
@@ -711,6 +715,8 @@ static void mpc512x_psc_relse_clock(struct uart_port *port)
 	struct clk *clk;
 
 	psc_num = (port->mapbase & 0xf00) >> 8;
+	if (psc_num >= ARRAY_SIZE(psc_mclk_clk))
+		return;
 	clk = psc_mclk_clk[psc_num];
 	if (clk) {
 		clk_disable_unprepare(clk);
@@ -733,6 +739,8 @@ static int mpc512x_psc_endis_clock(struct uart_port *port, int enable)
 		return 0;
 
 	psc_num = (port->mapbase & 0xf00) >> 8;
+	if (psc_num >= ARRAY_SIZE(psc_mclk_clk))
+		return -ENODEV;
 	psc_clk = psc_mclk_clk[psc_num];
 	if (!psc_clk) {
 		dev_err(port->dev, "Failed to get PSC clock entry!\n");
@@ -1351,7 +1359,6 @@ static const struct uart_ops mpc52xx_uart_ops = {
 	.startup	= mpc52xx_uart_startup,
 	.shutdown	= mpc52xx_uart_shutdown,
 	.set_termios	= mpc52xx_uart_set_termios,
-/*	.pm		= mpc52xx_uart_pm,		Not supported yet */
 	.type		= mpc52xx_uart_type,
 	.release_port	= mpc52xx_uart_release_port,
 	.request_port	= mpc52xx_uart_request_port,
@@ -1621,7 +1628,7 @@ mpc52xx_console_setup(struct console *co, char *options)
 		 (void *)port->mapbase, port->membase,
 		 port->irq, port->uartclk);
 
-	/* Setup the port parameters accoding to options */
+	/* Setup the port parameters according to options */
 	if (options)
 		uart_parse_options(options, &baud, &parity, &bits, &flow);
 	else
@@ -1843,7 +1850,7 @@ MODULE_DEVICE_TABLE(of, mpc52xx_uart_of_match);
 
 static struct platform_driver mpc52xx_uart_of_driver = {
 	.probe		= mpc52xx_uart_of_probe,
-	.remove_new	= mpc52xx_uart_of_remove,
+	.remove		= mpc52xx_uart_of_remove,
 #ifdef CONFIG_PM
 	.suspend	= mpc52xx_uart_of_suspend,
 	.resume		= mpc52xx_uart_of_resume,

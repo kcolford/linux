@@ -11,7 +11,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/regulator/consumer.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define ZET6223_MAX_FINGERS		16
 #define ZET6223_MAX_PKT_SIZE		(3 + 4 * ZET6223_MAX_FINGERS)
@@ -236,7 +236,7 @@ static const struct of_device_id zet6223_of_match[] = {
 MODULE_DEVICE_TABLE(of, zet6223_of_match);
 
 static const struct i2c_device_id zet6223_id[] = {
-	{ "zet6223" },
+	{ .name = "zet6223" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, zet6223_id);

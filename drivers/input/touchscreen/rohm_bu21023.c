@@ -388,13 +388,13 @@ static int rohm_ts_manual_calibration(struct rohm_ts_data *ts)
 			err_y = (int)READ_CALIB_BUF(PRM1_Y_H) << 2 |
 				READ_CALIB_BUF(PRM1_Y_L);
 
-			/* X axis ajust */
+			/* X axis adjust */
 			if (err_x <= 4)
 				calib_x -= AXIS_ADJUST;
 			else if (err_x >= 60)
 				calib_x += AXIS_ADJUST;
 
-			/* Y axis ajust */
+			/* Y axis adjust */
 			if (err_y <= 4)
 				calib_y -= AXIS_ADJUST;
 			else if (err_y >= 60)
@@ -1144,7 +1144,7 @@ static int rohm_bu21023_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id rohm_bu21023_i2c_id[] = {
-	{ BU21023_NAME },
+	{ .name = BU21023_NAME },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, rohm_bu21023_i2c_id);

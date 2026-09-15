@@ -76,18 +76,30 @@ static int debugfs_print_results(struct seq_file *seq, void *v)
 	seq_puts(seq, "KTAP version 1\n");
 	seq_puts(seq, "1..1\n");
 
-	/* Print suite header because it is not stored in the test logs. */
-	seq_puts(seq, KUNIT_SUBTEST_INDENT "KTAP version 1\n");
-	seq_printf(seq, KUNIT_SUBTEST_INDENT "# Subtest: %s\n", suite->name);
-	seq_printf(seq, KUNIT_SUBTEST_INDENT "1..%zd\n", kunit_suite_num_test_cases(suite));
+	if (suite->status != KUNIT_SKIPPED) {
+		/* Print suite header because it is not stored in the test logs. */
+		seq_puts(seq,
+			 KUNIT_SUBTEST_INDENT "KTAP version 1\n");
+		seq_printf(seq,
+			   KUNIT_SUBTEST_INDENT "# Subtest: %s\n",
+			   suite->name);
+		seq_printf(seq,
+			   KUNIT_SUBTEST_INDENT "1..%zd\n",
+			   kunit_suite_num_test_cases(suite));
 
-	kunit_suite_for_each_test_case(suite, test_case)
-		debugfs_print_result(seq, test_case->log);
+		kunit_suite_for_each_test_case(suite, test_case)
+			debugfs_print_result(seq, test_case->log);
+	}
 
 	debugfs_print_result(seq, suite->log);
 
-	seq_printf(seq, "%s %d %s\n",
-		   kunit_status_to_ok_not_ok(success), 1, suite->name);
+	if (suite->status != KUNIT_SKIPPED)
+		seq_printf(seq, "%s %d %s\n",
+			   kunit_status_to_ok_not_ok(success), 1, suite->name);
+	else
+		seq_printf(seq, "%s %d %s # SKIP %s\n",
+			   kunit_status_to_ok_not_ok(success), 1, suite->name,
+			   suite->status_comment);
 	return 0;
 }
 
@@ -145,7 +157,7 @@ static ssize_t debugfs_run(struct file *file,
 	struct inode *f_inode = file->f_inode;
 	struct kunit_suite *suite = (struct kunit_suite *) f_inode->i_private;
 
-	__kunit_test_suites_init(&suite, 1);
+	__kunit_test_suites_init(&suite, 1, true);
 
 	return count;
 }
@@ -181,7 +193,7 @@ void kunit_debugfs_create_suite(struct kunit_suite *suite)
 	 * successfully.
 	 */
 	stream = alloc_string_stream(GFP_KERNEL);
-	if (IS_ERR_OR_NULL(stream))
+	if (IS_ERR(stream))
 		return;
 
 	string_stream_set_append_newlines(stream, true);
@@ -189,7 +201,7 @@ void kunit_debugfs_create_suite(struct kunit_suite *suite)
 
 	kunit_suite_for_each_test_case(suite, test_case) {
 		stream = alloc_string_stream(GFP_KERNEL);
-		if (IS_ERR_OR_NULL(stream))
+		if (IS_ERR(stream))
 			goto err;
 
 		string_stream_set_append_newlines(stream, true);
@@ -212,8 +224,11 @@ void kunit_debugfs_create_suite(struct kunit_suite *suite)
 
 err:
 	string_stream_destroy(suite->log);
-	kunit_suite_for_each_test_case(suite, test_case)
+	suite->log = NULL;
+	kunit_suite_for_each_test_case(suite, test_case) {
 		string_stream_destroy(test_case->log);
+		test_case->log = NULL;
+	}
 }
 
 void kunit_debugfs_destroy_suite(struct kunit_suite *suite)

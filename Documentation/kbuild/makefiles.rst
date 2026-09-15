@@ -291,6 +291,10 @@ Example::
   # arch/x86/kernel/Makefile
   extra-y	+= vmlinux.lds
 
+extra-y is now deprecated because this is equivalent to:
+
+  always-$(KBUILD_BUILTIN) += vmlinux.lds
+
 $(extra-y) should only contain targets needed for vmlinux.
 
 Kbuild skips extra-y when vmlinux is apparently not a final goal.
@@ -318,9 +322,6 @@ ccflags-y, asflags-y and ldflags-y
   These three flags apply only to the kbuild makefile in which they
   are assigned. They are used for all the normal cc, as and ld
   invocations happening during a recursive build.
-  Note: Flags with the same behaviour were previously named:
-  EXTRA_CFLAGS, EXTRA_AFLAGS and EXTRA_LDFLAGS.
-  They are still supported but their usage is deprecated.
 
   ccflags-y specifies options for compiling with $(CC).
 
@@ -448,6 +449,20 @@ $(obj)
   to the target file are prefixed with $(obj), references
   to prerequisites are referenced with $(src) (because they are not
   generated files).
+
+$(srcroot)
+  $(srcroot) refers to the root of the source you are building, which can be
+  either the kernel source or the external modules source, depending on whether
+  KBUILD_EXTMOD is set. This can be either a relative or an absolute path, but
+  if KBUILD_ABS_SRCTREE=1 is set, it is always an absolute path.
+
+$(srctree)
+  $(srctree) refers to the root of the kernel source tree. When building the
+  kernel, this is the same as $(srcroot).
+
+$(objtree)
+  $(objtree) refers to the root of the kernel object tree. It is ``.`` when
+  building the kernel, but it is different when building external modules.
 
 $(kecho)
   echoing information to user in a rule is often a good practice
@@ -578,7 +593,7 @@ cc-option
   Note: cc-option uses KBUILD_CFLAGS for $(CC) options
 
 cc-option-yn
-  cc-option-yn is used to check if gcc supports a given option
+  cc-option-yn is used to check if $(CC) supports a given option
   and return "y" if supported, otherwise "n".
 
   Example::
@@ -596,7 +611,7 @@ cc-option-yn
   Note: cc-option-yn uses KBUILD_CFLAGS for $(CC) options
 
 cc-disable-warning
-  cc-disable-warning checks if gcc supports a given warning and returns
+  cc-disable-warning checks if $(CC) supports a given warning and returns
   the commandline switch to disable it. This special function is needed,
   because gcc 4.4 and later accept any unknown -Wno-* option and only
   warn about it if there is another warning in the source file.
@@ -606,7 +621,7 @@ cc-disable-warning
     KBUILD_CFLAGS += $(call cc-disable-warning, unused-but-set-variable)
 
   In the above example, -Wno-unused-but-set-variable will be added to
-  KBUILD_CFLAGS only if gcc really accepts it.
+  KBUILD_CFLAGS only if $(CC) really accepts it.
 
 gcc-min-version
   gcc-min-version tests if the value of $(CONFIG_GCC_VERSION) is greater than
@@ -614,10 +629,10 @@ gcc-min-version
 
   Example::
 
-    cflags-$(call gcc-min-version, 70100) := -foo
+    cflags-$(call gcc-min-version, 110100) := -foo
 
   In this example, cflags-y will be assigned the value -foo if $(CC) is gcc and
-  $(CONFIG_GCC_VERSION) is >= 7.1.
+  $(CONFIG_GCC_VERSION) is >= 11.1.
 
 clang-min-version
   clang-min-version tests if the value of $(CONFIG_CLANG_VERSION) is greater
@@ -655,6 +670,20 @@ cc-cross-prefix
                     CROSS_COMPILE := $(call cc-cross-prefix, m68k-linux-gnu-)
             endif
     endif
+
+$(RUSTC) support functions
+--------------------------
+
+rustc-min-version
+  rustc-min-version tests if the value of $(CONFIG_RUSTC_VERSION) is greater
+  than or equal to the provided value and evaluates to y if so.
+
+  Example::
+
+    rustflags-$(call rustc-min-version, 108500) := -Cfoo
+
+  In this example, rustflags-y will be assigned the value -Cfoo if
+  $(CONFIG_RUSTC_VERSION) is >= 1.85.0.
 
 $(LD) support functions
 -----------------------
@@ -1235,7 +1264,7 @@ Add prerequisites to archheaders
 --------------------------------
 
 The archheaders: rule is used to generate header files that
-may be installed into user space by ``make header_install``.
+may be installed into user space by ``make headers_install``.
 
 It is run before ``make archprepare`` when run on the
 architecture itself.
@@ -1256,8 +1285,39 @@ Example::
 In this example, the file target maketools will be processed
 before descending down in the subdirectories.
 
-See also chapter XXX-TODO that describes how kbuild supports
-generating offset header files.
+Generating offset header files
+------------------------------
+
+The ``include/generated/asm-offsets.h`` header exposes C structure
+member offsets and other compile-time constants to assembly code. It
+is generated from ``arch/$(SRCARCH)/kernel/asm-offsets.c``.
+
+The source file uses ``DEFINE()``, ``OFFSET()``, ``BLANK()`` and
+``COMMENT()`` from ``<linux/kbuild.h>``. These emit marker strings
+through inline asm that Kbuild extracts from the compiled assembly
+output.
+
+Example::
+
+  #include <linux/kbuild.h>
+  #include <linux/sched.h>
+
+  int main(void)
+  {
+          OFFSET(TSK_ACTIVE_MM, task_struct, active_mm);
+          DEFINE(THREAD_SIZE, THREAD_SIZE);
+          BLANK();
+          return 0;
+  }
+
+The rules are defined in the top-level ``Kbuild`` and
+``scripts/Makefile.lib``. The header is built during Kbuild's
+``prepare`` phase, after ``archprepare`` and before descending into
+subdirectories.
+
+The same mechanism generates ``include/generated/bounds.h`` from
+``kernel/bounds.c`` and ``include/generated/rq-offsets.h`` from
+``kernel/sched/rq-offsets.c``.
 
 List directories to visit when descending
 -----------------------------------------
@@ -1661,10 +1721,3 @@ Credits
 - Updates by Kai Germaschewski <kai@tp1.ruhr-uni-bochum.de>
 - Updates by Sam Ravnborg <sam@ravnborg.org>
 - Language QA by Jan Engelhardt <jengelh@gmx.de>
-
-TODO
-====
-
-- Describe how kbuild supports shipped files with _shipped.
-- Generating offset header files.
-- Add more variables to chapters 7 or 9?

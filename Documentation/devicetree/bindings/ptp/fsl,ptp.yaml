@@ -11,11 +11,14 @@ maintainers:
 
 properties:
   compatible:
-    enum:
-      - fsl,etsec-ptp
-      - fsl,fman-ptp-timer
-      - fsl,dpaa2-ptp
-      - fsl,enetc-ptp
+    oneOf:
+      - enum:
+          - fsl,etsec-ptp
+          - fsl,fman-ptp-timer
+          - fsl,dpaa2-ptp
+      - items:
+          - const: pci1957,ee02
+          - const: fsl,enetc-ptp
 
   reg:
     maxItems: 1
@@ -123,6 +126,15 @@ required:
   - compatible
   - reg
 
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: fsl,enetc-ptp
+    then:
+      $ref: /schemas/pci/pci-device.yaml
+
 additionalProperties: false
 
 examples:
@@ -134,11 +146,11 @@ examples:
         reg = <0x24e00 0xb0>;
         interrupts = <12 IRQ_TYPE_LEVEL_LOW>;
         interrupt-parent = <&ipic>;
-        fsl,cksel       = <1>;
+        fsl,cksel = <1>;
         fsl,tclk-period = <10>;
-        fsl,tmr-prsc    = <100>;
-        fsl,tmr-add     = <0x999999a4>;
-        fsl,tmr-fiper1  = <0x3b9ac9f6>;
-        fsl,tmr-fiper2  = <0x00018696>;
-        fsl,max-adj     = <659999998>;
+        fsl,tmr-prsc = <100>;
+        fsl,tmr-add = <0x999999a4>;
+        fsl,tmr-fiper1 = <0x3b9ac9f6>;
+        fsl,tmr-fiper2 = <0x00018696>;
+        fsl,max-adj = <659999998>;
     };

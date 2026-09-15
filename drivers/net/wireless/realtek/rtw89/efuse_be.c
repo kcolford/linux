@@ -8,11 +8,7 @@
 #include "reg.h"
 
 #define EFUSE_EXTERNALPN_ADDR_BE 0x1580
-#define EFUSE_B1_MSSDEVTYPE_MASK GENMASK(3, 0)
-#define EFUSE_B1_MSSCUSTIDX0_MASK GENMASK(7, 4)
 #define EFUSE_SERIALNUM_ADDR_BE 0x1581
-#define EFUSE_B2_MSSKEYNUM_MASK GENMASK(3, 0)
-#define EFUSE_B2_MSSCUSTIDX1_MASK BIT(6)
 #define EFUSE_SB_CRYP_SEL_ADDR 0x1582
 #define EFUSE_SB_CRYP_SEL_SIZE 2
 #define EFUSE_SB_CRYP_SEL_DEFAULT 0xFFFF
@@ -20,13 +16,14 @@
 #define EFUSE_SEC_BE_START 0x1580
 #define EFUSE_SEC_BE_SIZE 4
 
-enum rtw89_efuse_mss_dev_type {
-	MSS_DEV_TYPE_FWSEC_DEF = 0xF,
-	MSS_DEV_TYPE_FWSEC_WINLIN_INBOX = 0xC,
-	MSS_DEV_TYPE_FWSEC_NONLIN_INBOX_NON_COB = 0xA,
-	MSS_DEV_TYPE_FWSEC_NONLIN_INBOX_COB = 0x9,
-	MSS_DEV_TYPE_FWSEC_NONWIN_INBOX = 0x6,
-};
+#define EFUSE_VCORE_PWR_BE 0x17D6
+#define EFUSE_VCORE_PWR_BE_VALID BIT(12)
+#define EFUSE_VCORE_PWR_BE_VAL GENMASK(11, 0)
+#define SWR_DIG_MIN 860
+#define EFUSE_DIG_K_STEP 0xC
+#define EFUSE_DSWR_V0_86_BE 0x17DA
+#define EFUSE_DSWR_V0_86_BE_VALID BIT(5)
+#define EFUSE_DSWR_V0_86_BE_VAL GENMASK(4, 0)
 
 static const u32 sb_sel_mgn[SB_SEL_MGN_MAX_SIZE] = {
 	0x8000100, 0xC000180
@@ -404,6 +401,17 @@ int rtw89_parse_efuse_map_be(struct rtw89_dev *rtwdev)
 		goto out_free;
 	}
 
+	if (rtwdev->chip->chip_id != RTL8922D)
+		goto out_free;
+
+	ret = rtw89_parse_logical_efuse_block_be(rtwdev, phy_map, phy_size,
+						 RTW89_EFUSE_BLOCK_SYS);
+	if (ret) {
+		rtw89_warn(rtwdev, "failed to parse efuse logic block %d\n",
+			   RTW89_EFUSE_BLOCK_SYS);
+		goto out_free;
+	}
+
 out_free:
 	kfree(dav_phy_map);
 	kfree(phy_map);
@@ -477,33 +485,6 @@ static u16 get_sb_cryp_sel_idx(u16 sb_cryp_sel)
 	return sb_cryp_sel_v + low_bit;
 }
 
-static u8 get_mss_dev_type_idx(struct rtw89_dev *rtwdev, u8 mss_dev_type)
-{
-	switch (mss_dev_type) {
-	case MSS_DEV_TYPE_FWSEC_WINLIN_INBOX:
-		mss_dev_type = 0x0;
-		break;
-	case MSS_DEV_TYPE_FWSEC_NONLIN_INBOX_NON_COB:
-		mss_dev_type = 0x1;
-		break;
-	case MSS_DEV_TYPE_FWSEC_NONLIN_INBOX_COB:
-		mss_dev_type = 0x2;
-		break;
-	case MSS_DEV_TYPE_FWSEC_NONWIN_INBOX:
-		mss_dev_type = 0x3;
-		break;
-	case MSS_DEV_TYPE_FWSEC_DEF:
-		mss_dev_type = RTW89_FW_MSS_DEV_TYPE_FWSEC_DEF;
-		break;
-	default:
-		rtw89_warn(rtwdev, "unknown mss_dev_type %d", mss_dev_type);
-		mss_dev_type = RTW89_FW_MSS_DEV_TYPE_FWSEC_INV;
-		break;
-	}
-
-	return mss_dev_type;
-}
-
 int rtw89_efuse_read_fw_secure_be(struct rtw89_dev *rtwdev)
 {
 	struct rtw89_fw_secure *sec = &rtwdev->fw.sec;
@@ -511,7 +492,6 @@ int rtw89_efuse_read_fw_secure_be(struct rtw89_dev *rtwdev)
 	u32 sec_size = EFUSE_SEC_BE_SIZE;
 	u16 sb_cryp_sel, sb_cryp_sel_idx;
 	u8 sec_map[EFUSE_SEC_BE_SIZE];
-	u8 mss_dev_type;
 	u8 b1, b2;
 	int ret;
 
@@ -538,16 +518,9 @@ int rtw89_efuse_read_fw_secure_be(struct rtw89_dev *rtwdev)
 	b1 = sec_map[EFUSE_EXTERNALPN_ADDR_BE - sec_addr];
 	b2 = sec_map[EFUSE_SERIALNUM_ADDR_BE - sec_addr];
 
-	mss_dev_type = u8_get_bits(b1, EFUSE_B1_MSSDEVTYPE_MASK);
-	sec->mss_cust_idx = 0x1F - (u8_get_bits(b1, EFUSE_B1_MSSCUSTIDX0_MASK) |
-				    u8_get_bits(b2, EFUSE_B2_MSSCUSTIDX1_MASK) << 4);
-	sec->mss_key_num = 0xF - u8_get_bits(b2, EFUSE_B2_MSSKEYNUM_MASK);
-
-	sec->mss_dev_type = get_mss_dev_type_idx(rtwdev, mss_dev_type);
-	if (sec->mss_dev_type == RTW89_FW_MSS_DEV_TYPE_FWSEC_INV) {
-		rtw89_warn(rtwdev, "invalid mss_dev_type %d\n", mss_dev_type);
+	ret = rtw89_efuse_recognize_mss_info_v1(rtwdev, b1, b2);
+	if (ret)
 		goto out;
-	}
 
 	sec->secure_boot = true;
 
@@ -559,4 +532,124 @@ out:
 
 	return 0;
 }
-EXPORT_SYMBOL(rtw89_efuse_read_fw_secure_be);
+
+int rtw89_efuse_read_ecv_be(struct rtw89_dev *rtwdev)
+{
+	u32 dump_addr;
+	u8 buff[4]; /* efuse access must 4 bytes align */
+	int ret;
+	u8 ecv;
+	u8 val;
+
+	dump_addr = ALIGN_DOWN(EF_FV_OFSET_BE_V1, 4);
+
+	ret = rtw89_dump_physical_efuse_map_be(rtwdev, buff, dump_addr, 4, false);
+	if (ret)
+		return ret;
+
+	val = buff[EF_FV_OFSET_BE_V1 & 0x3];
+
+	ecv = u8_get_bits(val, EF_CV_MASK);
+	if (ecv == EF_CV_INV)
+		return -ENOENT;
+
+	rtwdev->hal.cv = ecv;
+
+	return 0;
+}
+
+int rtw89_efuse_read_thermal_k_be(struct rtw89_dev *rtwdev)
+{
+	struct rtw89_power_trim_info *info = &rtwdev->pwr_trim;
+	u32 dump_addr = EFUSE_THERMAL_K_OFFSET_BE;
+	u8 buff[4]; /* efuse access must be multiple of 4 bytes in size */
+	bool no_k;
+	u16 val16;
+	int ret;
+
+	ret = rtw89_dump_physical_efuse_map_be(rtwdev, buff, dump_addr, 4, false);
+	if (ret)
+		return ret;
+
+	val16 = buff[0] | buff[1] << 8;
+
+	no_k = !!u16_get_bits(val16, EFUSE_THERMAL_K_VALID_BE);
+	if (no_k) {
+		info->thermal_k = 0;
+		return -ENOENT;
+	}
+
+	info->thermal_k = u16_get_bits(val16, EFUSE_THERMAL_K_VAL_BE);
+
+	if (u16_get_bits(val16, EFUSE_THERMAL_K_SIGN_BE))
+		info->thermal_k *= -1;
+
+	return 0;
+}
+
+static int rtw89_efuse_read_pwr_data_vcore_be(struct rtw89_dev *rtwdev)
+{
+	struct rtw89_efuse *efuse = &rtwdev->efuse;
+	u32 dump_addr;
+	u8 buff[4]; /* efuse access must 4 bytes align */
+	u16 val16;
+	int ret;
+
+	dump_addr = ALIGN_DOWN(EFUSE_VCORE_PWR_BE, 4);
+
+	ret = rtw89_dump_physical_efuse_map_be(rtwdev, buff, dump_addr, 4, false);
+	if (ret)
+		return ret;
+
+	val16 = buff[EFUSE_VCORE_PWR_BE - dump_addr] |
+		buff[EFUSE_VCORE_PWR_BE - dump_addr + 1] << 8;
+
+	if (val16 & EFUSE_VCORE_PWR_BE_VALID)
+		return 0;
+
+	efuse->vcore_valid = true;
+	efuse->vcore_vmax_reduce =
+		(u16_get_bits(val16, EFUSE_VCORE_PWR_BE_VAL) - SWR_DIG_MIN) /
+		EFUSE_DIG_K_STEP;
+
+	return 0;
+}
+
+static int rtw89_efuse_read_pwr_data_dswr_be(struct rtw89_dev *rtwdev)
+{
+	struct rtw89_efuse *efuse = &rtwdev->efuse;
+	u32 dump_addr;
+	u8 buff[4]; /* efuse access must 4 bytes align */
+	u8 val8;
+	int ret;
+
+	dump_addr = ALIGN_DOWN(EFUSE_DSWR_V0_86_BE, 4);
+
+	ret = rtw89_dump_physical_efuse_map_be(rtwdev, buff, dump_addr, 4, false);
+	if (ret)
+		return ret;
+
+	val8 = buff[EFUSE_DSWR_V0_86_BE - dump_addr];
+
+	if (val8 & EFUSE_DSWR_V0_86_BE_VALID)
+		return 0;
+
+	efuse->dswr_valid = true;
+	efuse->dswr_vmin = u8_get_bits(val8, EFUSE_DSWR_V0_86_BE_VAL);
+
+	return 0;
+}
+
+int rtw89_efuse_read_pwr_data_be(struct rtw89_dev *rtwdev)
+{
+	int ret;
+
+	if (rtwdev->chip->chip_id != RTL8922D)
+		return 0;
+
+	ret = rtw89_efuse_read_pwr_data_vcore_be(rtwdev);
+	if (ret)
+		return ret;
+
+	return rtw89_efuse_read_pwr_data_dswr_be(rtwdev);
+}

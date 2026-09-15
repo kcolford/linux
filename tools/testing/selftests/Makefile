@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
+TARGETS += acct
+TARGETS += alloc_tag
 TARGETS += alsa
 TARGETS += amd-pstate
 TARGETS += arm64
@@ -13,13 +15,16 @@ TARGETS += core
 TARGETS += cpufreq
 TARGETS += cpu-hotplug
 TARGETS += damon
+TARGETS += dax
 TARGETS += devices/error_logs
 TARGETS += devices/probe
 TARGETS += dmabuf-heaps
 TARGETS += drivers/dma-buf
+TARGETS += drivers/ntsync
 TARGETS += drivers/s390x/uvdevice
 TARGETS += drivers/net
 TARGETS += drivers/net/bonding
+TARGETS += drivers/net/netconsole
 TARGETS += drivers/net/team
 TARGETS += drivers/net/virtio_net
 TARGETS += drivers/platform/x86/intel/ifs
@@ -30,9 +35,18 @@ TARGETS += fchmodat2
 TARGETS += filesystems
 TARGETS += filesystems/binderfs
 TARGETS += filesystems/epoll
+TARGETS += filesystems/failfs
 TARGETS += filesystems/fat
 TARGETS += filesystems/overlayfs
 TARGETS += filesystems/statmount
+TARGETS += filesystems/mount-notify
+TARGETS += filesystems/nsfs
+TARGETS += filesystems/fuse
+TARGETS += filesystems/move_mount
+TARGETS += filesystems/empty_mntns
+TARGETS += filesystems/fsmount_ns
+TARGETS += filesystems/fscontext_ns
+TARGETS += filesystems/mntns_cleanup
 TARGETS += firmware
 TARGETS += fpu
 TARGETS += ftrace
@@ -45,10 +59,12 @@ TARGETS += ipc
 TARGETS += ir
 TARGETS += kcmp
 TARGETS += kexec
+TARGETS += kselftest_harness
 TARGETS += kvm
 TARGETS += landlock
 TARGETS += lib
 TARGETS += livepatch
+TARGETS += liveupdate
 TARGETS += lkdtm
 TARGETS += lsm
 TARGETS += membarrier
@@ -59,19 +75,28 @@ TARGETS += mount
 TARGETS += mount_setattr
 TARGETS += move_mount_set_group
 TARGETS += mqueue
+TARGETS += mseal_system_mappings
 TARGETS += nci
 TARGETS += net
 TARGETS += net/af_unix
+TARGETS += net/can
 TARGETS += net/forwarding
 TARGETS += net/hsr
 TARGETS += net/mptcp
-TARGETS += net/openvswitch
-TARGETS += net/tcp_ao
 TARGETS += net/netfilter
-TARGETS += nsfs
+TARGETS += net/openvswitch
+TARGETS += net/ovpn
+TARGETS += net/packetdrill
+TARGETS += net/ppp
+TARGETS += net/rds
+TARGETS += net/tcp_ao
+TARGETS += nolibc
+TARGETS += pci_endpoint
+TARGETS += pcie_bwctrl
 TARGETS += perf_events
 TARGETS += pidfd
 TARGETS += pid_namespace
+TARGETS += pipe
 TARGETS += power_supply
 TARGETS += powerpc
 TARGETS += prctl
@@ -79,15 +104,17 @@ TARGETS += proc
 TARGETS += pstore
 TARGETS += ptrace
 TARGETS += openat2
+TARGETS += rdma
 TARGETS += resctrl
 TARGETS += riscv
 TARGETS += rlimits
 TARGETS += rseq
 TARGETS += rtc
 TARGETS += rust
+TARGETS += sched_ext
 TARGETS += seccomp
 TARGETS += sgx
-TARGETS += sigaltstack
+TARGETS += signal
 TARGETS += size
 TARGETS += sparc64
 TARGETS += splice
@@ -106,12 +133,14 @@ endif
 TARGETS += tmpfs
 TARGETS += tpm2
 TARGETS += tty
+TARGETS += ublk
 TARGETS += uevent
-TARGETS += user
 TARGETS += user_events
 TARGETS += vDSO
 TARGETS += mm
+TARGETS += vfio
 TARGETS += x86
+TARGETS += x86/bugs
 TARGETS += zram
 #Please keep the TARGETS list alphabetically sorted
 # Run "make quicktest=1 run_tests" or
@@ -127,10 +156,10 @@ ifeq ($(filter net/lib,$(TARGETS)),)
 endif
 endif
 
-# User can optionally provide a TARGETS skiplist.  By default we skip
-# BPF since it has cutting edge build time dependencies which require
-# more effort to install.
-SKIP_TARGETS ?= bpf
+# User can optionally provide a TARGETS skiplist. By default we skip
+# targets using BPF since it has cutting edge build time dependencies
+# which require more effort to install.
+SKIP_TARGETS ?= bpf sched_ext
 ifneq ($(SKIP_TARGETS),)
 	TMP := $(filter-out $(SKIP_TARGETS), $(TARGETS))
 	override TARGETS := $(TMP)
@@ -192,7 +221,7 @@ export KHDR_INCLUDES
 
 all:
 	@ret=1;							\
-	for TARGET in $(TARGETS); do				\
+	for TARGET in $(TARGETS) $(INSTALL_DEP_TARGETS); do	\
 		BUILD_TARGET=$$BUILD/$$TARGET;			\
 		mkdir $$BUILD_TARGET  -p;			\
 		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET	\
@@ -280,6 +309,14 @@ ifdef INSTALL_PATH
 		$(MAKE) -s --no-print-directory OUTPUT=$$BUILD_TARGET COLLECTION=$$TARGET \
 			-C $$TARGET emit_tests >> $(TEST_LIST); \
 	done;
+	@VERSION=$$(git describe HEAD 2>/dev/null); \
+	if [ -n "$$VERSION" ]; then \
+		echo "$$VERSION" > $(INSTALL_PATH)/VERSION; \
+		printf "Version saved to $(INSTALL_PATH)/VERSION\n"; \
+	else \
+		printf "Unable to get version from git describe\n"; \
+	fi
+	@echo "**Kselftest Installation is complete: $(INSTALL_PATH)**"
 else
 	$(error Error: set INSTALL_PATH to use install)
 endif
@@ -292,7 +329,7 @@ gen_tar: install
 	@echo "Created ${TAR_PATH}"
 
 clean:
-	@for TARGET in $(TARGETS); do \
+	@for TARGET in $(TARGETS) $(INSTALL_DEP_TARGETS); do \
 		BUILD_TARGET=$$BUILD/$$TARGET;	\
 		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET clean;\
 	done;

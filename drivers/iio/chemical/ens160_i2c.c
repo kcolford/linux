@@ -34,7 +34,7 @@ static int ens160_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ens160_i2c_id[] = {
-	{ "ens160" },
+	{ .name = "ens160" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ens160_i2c_id);
@@ -59,4 +59,4 @@ module_i2c_driver(ens160_i2c_driver);
 MODULE_AUTHOR("Gustavo Silva <gustavograzs@gmail.com>");
 MODULE_DESCRIPTION("ScioSense ENS160 I2C driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ENS160);
+MODULE_IMPORT_NS("IIO_ENS160");

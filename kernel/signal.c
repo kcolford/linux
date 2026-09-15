@@ -59,6 +59,8 @@
 #include <asm/cacheflush.h>
 #include <asm/syscall.h>	/* for syscall_get_* */
 
+#include "time/posix-timers.h"
+
 /*
  * SLAB caches for signal bits.
  */
@@ -128,28 +130,10 @@ static bool sig_ignored(struct task_struct *t, int sig, bool force)
  */
 static inline bool has_pending_signals(sigset_t *signal, sigset_t *blocked)
 {
-	unsigned long ready;
-	long i;
-
-	switch (_NSIG_WORDS) {
-	default:
-		for (i = _NSIG_WORDS, ready = 0; --i >= 0 ;)
-			ready |= signal->sig[i] &~ blocked->sig[i];
-		break;
-
-	case 4: ready  = signal->sig[3] &~ blocked->sig[3];
-		ready |= signal->sig[2] &~ blocked->sig[2];
-		ready |= signal->sig[1] &~ blocked->sig[1];
-		ready |= signal->sig[0] &~ blocked->sig[0];
-		break;
-
-	case 2: ready  = signal->sig[1] &~ blocked->sig[1];
-		ready |= signal->sig[0] &~ blocked->sig[0];
-		break;
-
-	case 1: ready  = signal->sig[0] &~ blocked->sig[0];
-	}
-	return ready !=	0;
+	unsigned long ready = 0;
+	for (long i = 0; i < _NSIG_WORDS; i++)
+		ready |= signal->sig[i] & ~blocked->sig[i];
+	return ready != 0;
 }
 
 #define PENDING(p,b) has_pending_signals(&(p)->signal, (b))
@@ -174,9 +158,10 @@ static bool recalc_sigpending_tsk(struct task_struct *t)
 
 void recalc_sigpending(void)
 {
-	if (!recalc_sigpending_tsk(current) && !freezing(current))
-		clear_thread_flag(TIF_SIGPENDING);
-
+	if (!recalc_sigpending_tsk(current) && !freezing(current)) {
+		if (unlikely(test_thread_flag(TIF_SIGPENDING)))
+			clear_thread_flag(TIF_SIGPENDING);
+	}
 }
 EXPORT_SYMBOL(recalc_sigpending);
 
@@ -396,16 +381,9 @@ void task_join_group_stop(struct task_struct *task)
 	task_set_jobctl_pending(task, mask | JOBCTL_STOP_PENDING);
 }
 
-/*
- * allocate a new signal queue record
- * - this may be called without locks if and only if t == current, otherwise an
- *   appropriate lock must be held to stop the target task from exiting
- */
-static struct sigqueue *
-__sigqueue_alloc(int sig, struct task_struct *t, gfp_t gfp_flags,
-		 int override_rlimit, const unsigned int sigqueue_flags)
+static struct ucounts *sig_get_ucounts(struct task_struct *t, int sig,
+				       int override_rlimit)
 {
-	struct sigqueue *q = NULL;
 	struct ucounts *ucounts;
 	long sigpending;
 
@@ -419,31 +397,59 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t gfp_flags,
 	 */
 	rcu_read_lock();
 	ucounts = task_ucounts(t);
-	sigpending = inc_rlimit_get_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING);
+	sigpending = inc_rlimit_get_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING,
+					    override_rlimit);
 	rcu_read_unlock();
 	if (!sigpending)
 		return NULL;
 
-	if (override_rlimit || likely(sigpending <= task_rlimit(t, RLIMIT_SIGPENDING))) {
-		q = kmem_cache_alloc(sigqueue_cachep, gfp_flags);
-	} else {
+	if (unlikely(!override_rlimit && sigpending > task_rlimit(t, RLIMIT_SIGPENDING))) {
+		dec_rlimit_put_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING);
 		print_dropped_signal(sig);
+		return NULL;
 	}
 
-	if (unlikely(q == NULL)) {
+	return ucounts;
+}
+
+static void __sigqueue_init(struct sigqueue *q, struct ucounts *ucounts,
+			    const unsigned int sigqueue_flags)
+{
+	INIT_LIST_HEAD(&q->list);
+	q->flags = sigqueue_flags;
+	q->ucounts = ucounts;
+}
+
+/*
+ * allocate a new signal queue record
+ * - this may be called without locks if and only if t == current, otherwise an
+ *   appropriate lock must be held to stop the target task from exiting
+ */
+static struct sigqueue *sigqueue_alloc(int sig, struct task_struct *t, gfp_t gfp_flags,
+				       int override_rlimit)
+{
+	struct ucounts *ucounts = sig_get_ucounts(t, sig, override_rlimit);
+	struct sigqueue *q;
+
+	if (!ucounts)
+		return NULL;
+
+	q = kmem_cache_alloc(sigqueue_cachep, gfp_flags);
+	if (!q) {
 		dec_rlimit_put_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING);
-	} else {
-		INIT_LIST_HEAD(&q->list);
-		q->flags = sigqueue_flags;
-		q->ucounts = ucounts;
+		return NULL;
 	}
+
+	__sigqueue_init(q, ucounts, 0);
 	return q;
 }
 
 static void __sigqueue_free(struct sigqueue *q)
 {
-	if (q->flags & SIGQUEUE_PREALLOC)
+	if (q->flags & SIGQUEUE_PREALLOC) {
+		posixtimer_sigqueue_putref(q);
 		return;
+	}
 	if (q->ucounts) {
 		dec_rlimit_put_ucounts(q->ucounts, UCOUNT_RLIMIT_SIGPENDING);
 		q->ucounts = NULL;
@@ -477,42 +483,6 @@ void flush_signals(struct task_struct *t)
 	spin_unlock_irqrestore(&t->sighand->siglock, flags);
 }
 EXPORT_SYMBOL(flush_signals);
-
-#ifdef CONFIG_POSIX_TIMERS
-static void __flush_itimer_signals(struct sigpending *pending)
-{
-	sigset_t signal, retain;
-	struct sigqueue *q, *n;
-
-	signal = pending->signal;
-	sigemptyset(&retain);
-
-	list_for_each_entry_safe(q, n, &pending->list, list) {
-		int sig = q->info.si_signo;
-
-		if (likely(q->info.si_code != SI_TIMER)) {
-			sigaddset(&retain, sig);
-		} else {
-			sigdelset(&signal, sig);
-			list_del_init(&q->list);
-			__sigqueue_free(q);
-		}
-	}
-
-	sigorsets(&pending->signal, &signal, &retain);
-}
-
-void flush_itimer_signals(void)
-{
-	struct task_struct *tsk = current;
-	unsigned long flags;
-
-	spin_lock_irqsave(&tsk->sighand->siglock, flags);
-	__flush_itimer_signals(&tsk->pending);
-	__flush_itimer_signals(&tsk->signal->shared_pending);
-	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
-}
-#endif
 
 void ignore_signals(struct task_struct *t)
 {
@@ -563,7 +533,7 @@ bool unhandled_signal(struct task_struct *tsk, int sig)
 }
 
 static void collect_signal(int sig, struct sigpending *list, kernel_siginfo_t *info,
-			   bool *resched_timer)
+			   struct sigqueue **timer_sigq)
 {
 	struct sigqueue *q, *first = NULL;
 
@@ -586,12 +556,17 @@ still_pending:
 		list_del_init(&first->list);
 		copy_siginfo(info, &first->info);
 
-		*resched_timer =
-			(first->flags & SIGQUEUE_PREALLOC) &&
-			(info->si_code == SI_TIMER) &&
-			(info->si_sys_private);
-
-		__sigqueue_free(first);
+		/*
+		 * posix-timer signals are preallocated and freed when the last
+		 * reference count is dropped in posixtimer_deliver_signal() or
+		 * immediately on timer deletion when the signal is not pending.
+		 * Spare the extra round through __sigqueue_free() which is
+		 * ignoring preallocated signals.
+		 */
+		if (unlikely((first->flags & SIGQUEUE_PREALLOC) && (info->si_code == SI_TIMER)))
+			*timer_sigq = first;
+		else
+			__sigqueue_free(first);
 	} else {
 		/*
 		 * Ok, it wasn't in the queue.  This must be
@@ -608,61 +583,39 @@ still_pending:
 }
 
 static int __dequeue_signal(struct sigpending *pending, sigset_t *mask,
-			kernel_siginfo_t *info, bool *resched_timer)
+			    kernel_siginfo_t *info, struct sigqueue **timer_sigq)
 {
 	int sig = next_signal(pending, mask);
 
 	if (sig)
-		collect_signal(sig, pending, info, resched_timer);
+		collect_signal(sig, pending, info, timer_sigq);
 	return sig;
 }
 
 /*
- * Dequeue a signal and return the element to the caller, which is
- * expected to free it.
- *
- * All callers have to hold the siglock.
+ * Try to dequeue a signal. If a deliverable signal is found fill in the
+ * caller provided siginfo and return the signal number. Otherwise return
+ * 0.
  */
-int dequeue_signal(struct task_struct *tsk, sigset_t *mask,
-		   kernel_siginfo_t *info, enum pid_type *type)
+int dequeue_signal(sigset_t *mask, kernel_siginfo_t *info, enum pid_type *type)
 {
-	bool resched_timer = false;
+	struct task_struct *tsk = current;
+	struct sigqueue *timer_sigq;
 	int signr;
 
-	/* We only dequeue private signals from ourselves, we don't let
-	 * signalfd steal them
-	 */
+	lockdep_assert_held(&tsk->sighand->siglock);
+
+again:
 	*type = PIDTYPE_PID;
-	signr = __dequeue_signal(&tsk->pending, mask, info, &resched_timer);
+	timer_sigq = NULL;
+	signr = __dequeue_signal(&tsk->pending, mask, info, &timer_sigq);
 	if (!signr) {
 		*type = PIDTYPE_TGID;
 		signr = __dequeue_signal(&tsk->signal->shared_pending,
-					 mask, info, &resched_timer);
-#ifdef CONFIG_POSIX_TIMERS
-		/*
-		 * itimer signal ?
-		 *
-		 * itimers are process shared and we restart periodic
-		 * itimers in the signal delivery path to prevent DoS
-		 * attacks in the high resolution timer case. This is
-		 * compliant with the old way of self-restarting
-		 * itimers, as the SIGALRM is a legacy signal and only
-		 * queued once. Changing the restart behaviour to
-		 * restart the timer in the signal dequeue path is
-		 * reducing the timer noise on heavy loaded !highres
-		 * systems too.
-		 */
-		if (unlikely(signr == SIGALRM)) {
-			struct hrtimer *tmr = &tsk->signal->real_timer;
+					 mask, info, &timer_sigq);
 
-			if (!hrtimer_is_queued(tmr) &&
-			    tsk->signal->it_real_incr != 0) {
-				hrtimer_forward(tmr, tmr->base->get_time(),
-						tsk->signal->it_real_incr);
-				hrtimer_restart(tmr);
-			}
-		}
-#endif
+		if (unlikely(signr == SIGALRM))
+			posixtimer_rearm_itimer(tsk);
 	}
 
 	recalc_sigpending();
@@ -684,22 +637,12 @@ int dequeue_signal(struct task_struct *tsk, sigset_t *mask,
 		 */
 		current->jobctl |= JOBCTL_STOP_DEQUEUED;
 	}
-#ifdef CONFIG_POSIX_TIMERS
-	if (resched_timer) {
-		/*
-		 * Release the siglock to ensure proper locking order
-		 * of timer locks outside of siglocks.  Note, we leave
-		 * irqs disabled here, since the posix-timers code is
-		 * about to disable them again anyway.
-		 */
-		spin_unlock(&tsk->sighand->siglock);
-		posixtimer_rearm(info);
-		spin_lock(&tsk->sighand->siglock);
 
-		/* Don't expose the si_sys_private value to userspace */
-		info->si_sys_private = 0;
+	if (IS_ENABLED(CONFIG_POSIX_TIMERS) && unlikely(timer_sigq)) {
+		if (!posixtimer_deliver_signal(info, timer_sigq))
+			goto again;
 	}
-#endif
+
 	return signr;
 }
 EXPORT_SYMBOL_GPL(dequeue_signal);
@@ -774,16 +717,23 @@ void signal_wake_up_state(struct task_struct *t, unsigned int state)
 		kick_process(t);
 }
 
-/*
- * Remove signals in mask from the pending set and queue.
- * Returns 1 if any signals were found.
- *
- * All callers must be holding the siglock.
- */
-static void flush_sigqueue_mask(sigset_t *mask, struct sigpending *s)
+static inline void posixtimer_sig_ignore(struct task_struct *tsk, struct sigqueue *q);
+
+static void sigqueue_free_ignored(struct task_struct *tsk, struct sigqueue *q)
+{
+	if (likely(!(q->flags & SIGQUEUE_PREALLOC) || q->info.si_code != SI_TIMER))
+		__sigqueue_free(q);
+	else
+		posixtimer_sig_ignore(tsk, q);
+}
+
+/* Remove signals in mask from the pending set and queue. */
+static void flush_sigqueue_mask(struct task_struct *p, sigset_t *mask, struct sigpending *s)
 {
 	struct sigqueue *q, *n;
 	sigset_t m;
+
+	lockdep_assert_held(&p->sighand->siglock);
 
 	sigandsets(&m, mask, &s->signal);
 	if (sigisemptyset(&m))
@@ -793,7 +743,7 @@ static void flush_sigqueue_mask(sigset_t *mask, struct sigpending *s)
 	list_for_each_entry_safe(q, n, &s->list, list) {
 		if (sigismember(mask, q->info.si_signo)) {
 			list_del_init(&q->list);
-			__sigqueue_free(q);
+			sigqueue_free_ignored(p, q);
 		}
 	}
 }
@@ -918,18 +868,18 @@ static bool prepare_signal(int sig, struct task_struct *p, bool force)
 		 * This is a stop signal.  Remove SIGCONT from all queues.
 		 */
 		siginitset(&flush, sigmask(SIGCONT));
-		flush_sigqueue_mask(&flush, &signal->shared_pending);
+		flush_sigqueue_mask(p, &flush, &signal->shared_pending);
 		for_each_thread(p, t)
-			flush_sigqueue_mask(&flush, &t->pending);
+			flush_sigqueue_mask(p, &flush, &t->pending);
 	} else if (sig == SIGCONT) {
 		unsigned int why;
 		/*
 		 * Remove all stop signals from all queues, wake all threads.
 		 */
 		siginitset(&flush, SIG_KERNEL_STOP_MASK);
-		flush_sigqueue_mask(&flush, &signal->shared_pending);
+		flush_sigqueue_mask(p, &flush, &signal->shared_pending);
 		for_each_thread(p, t) {
-			flush_sigqueue_mask(&flush, &t->pending);
+			flush_sigqueue_mask(p, &flush, &t->pending);
 			task_clear_jobctl_pending(t, JOBCTL_STOP_PENDING);
 			if (likely(!(t->ptrace & PT_SEIZED))) {
 				t->jobctl &= ~JOBCTL_STOPPED;
@@ -1032,9 +982,7 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
 	 * Found a killable thread.  If the signal will be fatal,
 	 * then start taking the whole group down immediately.
 	 */
-	if (sig_fatal(p, sig) &&
-	    (signal->core_state || !(signal->flags & SIGNAL_GROUP_EXIT)) &&
-	    !sigismember(&t->real_blocked, sig) &&
+	if (sig_fatal(p, sig) && !sigismember(&t->real_blocked, sig) &&
 	    (sig == SIGKILL || !p->ptrace)) {
 		/*
 		 * This signal will be fatal to the whole group.
@@ -1116,7 +1064,7 @@ static int __send_signal_locked(int sig, struct kernel_siginfo *info,
 	else
 		override_rlimit = 0;
 
-	q = __sigqueue_alloc(sig, t, GFP_ATOMIC, override_rlimit, 0);
+	q = sigqueue_alloc(sig, t, GFP_ATOMIC, override_rlimit);
 
 	if (q) {
 		list_add_tail(&q->list, &pending->list);
@@ -1215,6 +1163,7 @@ static inline bool has_si_pid_and_uid(struct kernel_siginfo *info)
 int send_signal_locked(int sig, struct kernel_siginfo *info,
 		       struct task_struct *t, enum pid_type type)
 {
+	struct kernel_siginfo __maybe_unused rewritten;
 	/* Should SIGKILL or SIGSTOP be received by a pid namespace init? */
 	bool force = false;
 
@@ -1226,24 +1175,34 @@ int send_signal_locked(int sig, struct kernel_siginfo *info,
 		force = true;
 	} else if (has_si_pid_and_uid(info)) {
 		/* SIGKILL and SIGSTOP is special or has ids */
+#ifdef CONFIG_USER_NS
 		struct user_namespace *t_user_ns;
+		kuid_t uid;
 
 		rcu_read_lock();
 		t_user_ns = task_cred_xxx(t, user_ns);
 		if (current_user_ns() != t_user_ns) {
-			kuid_t uid = make_kuid(current_user_ns(), info->si_uid);
-			info->si_uid = from_kuid_munged(t_user_ns, uid);
+			rewritten = *info;
+			info = &rewritten;
+			uid = make_kuid(current_user_ns(), info->si_uid);
+			rewritten.si_uid = from_kuid_munged(t_user_ns, uid);
 		}
 		rcu_read_unlock();
-
+#endif
 		/* A kernel generated signal? */
 		force = (info->si_code == SI_KERNEL);
 
+#ifdef CONFIG_PID_NS
 		/* From an ancestor pid namespace? */
 		if (!task_pid_nr_ns(current, task_active_pid_ns(t))) {
-			info->si_pid = 0;
+			if (info != &rewritten) {
+				rewritten = *info;
+				info = &rewritten;
+			}
+			rewritten.si_pid = 0;
 			force = true;
 		}
+#endif
 	}
 	return __send_signal_locked(sig, info, t, type, force);
 }
@@ -1372,6 +1331,7 @@ int zap_other_threads(struct task_struct *p)
 	int count = 0;
 
 	p->signal->group_stop_count = 0;
+	task_clear_jobctl_pending(p, JOBCTL_PENDING_MASK);
 
 	for_other_threads(p, t) {
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
@@ -1387,16 +1347,24 @@ int zap_other_threads(struct task_struct *p)
 	return count;
 }
 
-struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
-					   unsigned long *flags)
+struct sighand_struct *lock_task_sighand(struct task_struct *tsk,
+					 unsigned long *flags)
 {
 	struct sighand_struct *sighand;
 
 	rcu_read_lock();
 	for (;;) {
 		sighand = rcu_dereference(tsk->sighand);
-		if (unlikely(sighand == NULL))
+		if (unlikely(sighand == NULL)) {
+			/*
+			 * Pairs with the smp_store_release() in
+			 * __exit_signal().  It ensures that all state
+			 * modifications to the task preceeding the store are
+			 * visible to the callers of lock_task_sighand().
+			 */
+			smp_acquire__after_ctrl_dep();
 			break;
+		}
 
 		/*
 		 * This sighand can be already freed and even reused, but
@@ -1924,108 +1892,273 @@ int kill_pid(struct pid *pid, int sig, int priv)
 }
 EXPORT_SYMBOL(kill_pid);
 
-/*
- * These functions support sending signals using preallocated sigqueue
- * structures.  This is needed "because realtime applications cannot
- * afford to lose notifications of asynchronous events, like timer
- * expirations or I/O completions".  In the case of POSIX Timers
- * we allocate the sigqueue structure from the timer_create.  If this
- * allocation fails we are able to report the failure to the application
- * with an EAGAIN error.
- */
-struct sigqueue *sigqueue_alloc(void)
+int kill_cad_pid(int sig, int priv)
 {
-	return __sigqueue_alloc(-1, current, GFP_KERNEL, 0, SIGQUEUE_PREALLOC);
-}
+	int ret;
 
-void sigqueue_free(struct sigqueue *q)
-{
-	unsigned long flags;
-	spinlock_t *lock = &current->sighand->siglock;
-
-	BUG_ON(!(q->flags & SIGQUEUE_PREALLOC));
-	/*
-	 * We must hold ->siglock while testing q->list
-	 * to serialize with collect_signal() or with
-	 * __exit_signal()->flush_sigqueue().
-	 */
-	spin_lock_irqsave(lock, flags);
-	q->flags &= ~SIGQUEUE_PREALLOC;
-	/*
-	 * If it is queued it will be freed when dequeued,
-	 * like the "regular" sigqueue.
-	 */
-	if (!list_empty(&q->list))
-		q = NULL;
-	spin_unlock_irqrestore(lock, flags);
-
-	if (q)
-		__sigqueue_free(q);
-}
-
-int send_sigqueue(struct sigqueue *q, struct pid *pid, enum pid_type type)
-{
-	int sig = q->info.si_signo;
-	struct sigpending *pending;
-	struct task_struct *t;
-	unsigned long flags;
-	int ret, result;
-
-	BUG_ON(!(q->flags & SIGQUEUE_PREALLOC));
-
-	ret = -1;
 	rcu_read_lock();
+	ret = kill_pid(rcu_dereference(cad_pid), sig, priv);
+	rcu_read_unlock();
 
-	/*
-	 * This function is used by POSIX timers to deliver a timer signal.
-	 * Where type is PIDTYPE_PID (such as for timers with SIGEV_THREAD_ID
-	 * set), the signal must be delivered to the specific thread (queues
-	 * into t->pending).
-	 *
-	 * Where type is not PIDTYPE_PID, signals must be delivered to the
-	 * process. In this case, prefer to deliver to current if it is in
-	 * the same thread group as the target process, which avoids
-	 * unnecessarily waking up a potentially idle task.
-	 */
-	t = pid_task(pid, type);
-	if (!t)
-		goto ret;
-	if (type != PIDTYPE_PID && same_thread_group(t, current))
-		t = current;
-	if (!likely(lock_task_sighand(t, &flags)))
-		goto ret;
+	return ret;
+}
+EXPORT_SYMBOL(kill_cad_pid);
 
-	ret = 1; /* the signal is ignored */
-	result = TRACE_SIGNAL_IGNORED;
-	if (!prepare_signal(sig, t, false))
-		goto out;
+#ifdef CONFIG_POSIX_TIMERS
+/*
+ * These functions handle POSIX timer signals. POSIX timers use
+ * preallocated sigqueue structs for sending signals.
+ */
+static void __flush_itimer_signals(struct sigpending *pending)
+{
+	sigset_t signal, retain;
+	struct sigqueue *q, *n;
 
-	ret = 0;
-	if (unlikely(!list_empty(&q->list))) {
-		/*
-		 * If an SI_TIMER entry is already queue just increment
-		 * the overrun count.
-		 */
-		BUG_ON(q->info.si_code != SI_TIMER);
-		q->info.si_overrun++;
-		result = TRACE_SIGNAL_ALREADY_PENDING;
-		goto out;
+	signal = pending->signal;
+	sigemptyset(&retain);
+
+	list_for_each_entry_safe(q, n, &pending->list, list) {
+		int sig = q->info.si_signo;
+
+		if (likely(q->info.si_code != SI_TIMER)) {
+			sigaddset(&retain, sig);
+		} else {
+			sigdelset(&signal, sig);
+			list_del_init(&q->list);
+			__sigqueue_free(q);
+		}
 	}
-	q->info.si_overrun = 0;
+
+	sigorsets(&pending->signal, &signal, &retain);
+}
+
+void flush_itimer_signals(void)
+{
+	struct task_struct *tsk = current;
+
+	guard(spinlock_irqsave)(&tsk->sighand->siglock);
+	__flush_itimer_signals(&tsk->pending);
+	__flush_itimer_signals(&tsk->signal->shared_pending);
+}
+
+bool posixtimer_init_sigqueue(struct sigqueue *q)
+{
+	struct ucounts *ucounts = sig_get_ucounts(current, -1, 0);
+
+	if (!ucounts)
+		return false;
+	clear_siginfo(&q->info);
+	__sigqueue_init(q, ucounts, SIGQUEUE_PREALLOC);
+	return true;
+}
+
+static void posixtimer_queue_sigqueue(struct sigqueue *q, struct task_struct *t, enum pid_type type)
+{
+	struct sigpending *pending;
+	int sig = q->info.si_signo;
 
 	signalfd_notify(t, sig);
 	pending = (type != PIDTYPE_PID) ? &t->signal->shared_pending : &t->pending;
 	list_add_tail(&q->list, &pending->list);
 	sigaddset(&pending->signal, sig);
 	complete_signal(sig, t, type);
+}
+
+/*
+ * This function is used by POSIX timers to deliver a timer signal.
+ * Where type is PIDTYPE_PID (such as for timers with SIGEV_THREAD_ID
+ * set), the signal must be delivered to the specific thread (queues
+ * into t->pending).
+ *
+ * Where type is not PIDTYPE_PID, signals must be delivered to the
+ * process. In this case, prefer to deliver to current if it is in
+ * the same thread group as the target process and its sighand is
+ * stable, which avoids unnecessarily waking up a potentially idle task.
+ */
+static inline struct task_struct *posixtimer_get_target(struct k_itimer *tmr)
+{
+	struct task_struct *t = pid_task(tmr->it_pid, tmr->it_pid_type);
+
+	if (t && tmr->it_pid_type != PIDTYPE_PID &&
+	    same_thread_group(t, current) && !current->exit_state)
+		t = current;
+	return t;
+}
+
+void posixtimer_send_sigqueue(struct k_itimer *tmr)
+{
+	struct sigqueue *q = &tmr->sigq;
+	int sig = q->info.si_signo;
+	struct task_struct *t;
+	unsigned long flags;
+	int result;
+
+	guard(rcu)();
+
+	t = posixtimer_get_target(tmr);
+	if (!t)
+		return;
+
+	if (!likely(lock_task_sighand(t, &flags)))
+		return;
+
+	/*
+	 * Update @tmr::sigqueue_seq for posix timer signals with sighand
+	 * locked to prevent a race against dequeue_signal().
+	 */
+	tmr->it_sigqueue_seq = tmr->it_signal_seq;
+
+	/*
+	 * Set the signal delivery status under sighand lock, so that the
+	 * ignored signal handling can distinguish between a periodic and a
+	 * non-periodic timer.
+	 */
+	tmr->it_sig_periodic = tmr->it_status == POSIX_TIMER_REQUEUE_PENDING;
+
+	if (!prepare_signal(sig, t, false)) {
+		result = TRACE_SIGNAL_IGNORED;
+
+		if (!list_empty(&q->list)) {
+			/*
+			 * The signal was ignored and blocked. The timer
+			 * expiry queued it because blocked signals are
+			 * queued independent of the ignored state.
+			 *
+			 * The unblocking set SIGPENDING, but the signal
+			 * was not yet dequeued from the pending list.
+			 * So prepare_signal() sees unblocked and ignored,
+			 * which ends up here. Leave it queued like a
+			 * regular signal.
+			 *
+			 * The same happens when the task group is exiting
+			 * and the signal is already queued.
+			 * prepare_signal() treats SIGNAL_GROUP_EXIT as
+			 * ignored independent of its queued state. This
+			 * gets cleaned up in __exit_signal().
+			 */
+			goto out;
+		}
+
+		/* Periodic timers with SIG_IGN are queued on the ignored list */
+		if (tmr->it_sig_periodic) {
+			/*
+			 * Already queued means the timer was rearmed after
+			 * the previous expiry got it on the ignore list.
+			 * Nothing to do for that case.
+			 */
+			if (hlist_unhashed(&tmr->ignored_list)) {
+				/*
+				 * Take a signal reference and queue it on
+				 * the ignored list.
+				 */
+				posixtimer_sigqueue_getref(q);
+				posixtimer_sig_ignore(t, q);
+			}
+		} else if (!hlist_unhashed(&tmr->ignored_list)) {
+			/*
+			 * Covers the case where a timer was periodic and
+			 * then the signal was ignored. Later it was rearmed
+			 * as oneshot timer. The previous signal is invalid
+			 * now, and this oneshot signal has to be dropped.
+			 * Remove it from the ignored list and drop the
+			 * reference count as the signal is not longer
+			 * queued.
+			 */
+			hlist_del_init(&tmr->ignored_list);
+			posixtimer_putref(tmr);
+		}
+		goto out;
+	}
+
+	if (unlikely(!list_empty(&q->list))) {
+		/* This holds a reference count already */
+		result = TRACE_SIGNAL_ALREADY_PENDING;
+		goto out;
+	}
+
+	/*
+	 * If the signal is on the ignore list, it got blocked after it was
+	 * ignored earlier. But nothing lifted the ignore. Move it back to
+	 * the pending list to be consistent with the regular signal
+	 * handling. This already holds a reference count.
+	 *
+	 * If it's not on the ignore list acquire a reference count.
+	 */
+	if (likely(hlist_unhashed(&tmr->ignored_list)))
+		posixtimer_sigqueue_getref(q);
+	else
+		hlist_del_init(&tmr->ignored_list);
+
+	posixtimer_queue_sigqueue(q, t, tmr->it_pid_type);
 	result = TRACE_SIGNAL_DELIVERED;
 out:
-	trace_signal_generate(sig, &q->info, t, type != PIDTYPE_PID, result);
+	trace_signal_generate(sig, &q->info, t, tmr->it_pid_type != PIDTYPE_PID, result);
 	unlock_task_sighand(t, &flags);
-ret:
-	rcu_read_unlock();
-	return ret;
 }
+
+static inline void posixtimer_sig_ignore(struct task_struct *tsk, struct sigqueue *q)
+{
+	struct k_itimer *tmr = container_of(q, struct k_itimer, sigq);
+
+	/*
+	 * If the timer is marked deleted already or the signal originates
+	 * from a non-periodic timer, then just drop the reference
+	 * count. Otherwise queue it on the ignored list.
+	 */
+	if (posixtimer_valid(tmr) && tmr->it_sig_periodic)
+		hlist_add_head(&tmr->ignored_list, &tsk->signal->ignored_posix_timers);
+	else
+		posixtimer_putref(tmr);
+}
+
+static void posixtimer_sig_unignore(struct task_struct *tsk, int sig)
+{
+	struct hlist_head *head = &tsk->signal->ignored_posix_timers;
+	struct hlist_node *tmp;
+	struct k_itimer *tmr;
+
+	if (likely(hlist_empty(head)))
+		return;
+
+	/*
+	 * Rearming a timer with sighand lock held is not possible due to
+	 * lock ordering vs. tmr::it_lock. Just stick the sigqueue back and
+	 * let the signal delivery path deal with it whether it needs to be
+	 * rearmed or not. This cannot be decided here w/o dropping sighand
+	 * lock and creating a loop retry horror show.
+	 */
+	hlist_for_each_entry_safe(tmr, tmp , head, ignored_list) {
+		struct task_struct *target;
+
+		/*
+		 * tmr::sigq.info.si_signo is immutable, so accessing it
+		 * without holding tmr::it_lock is safe.
+		 */
+		if (tmr->sigq.info.si_signo != sig)
+			continue;
+
+		hlist_del_init(&tmr->ignored_list);
+
+		/* This should never happen and leaks a reference count */
+		if (WARN_ON_ONCE(!list_empty(&tmr->sigq.list)))
+			continue;
+
+		/*
+		 * Get the target for the signal. If target is a thread and
+		 * has exited by now, drop the reference count.
+		 */
+		guard(rcu)();
+		target = posixtimer_get_target(tmr);
+		if (target)
+			posixtimer_queue_sigqueue(&tmr->sigq, target, tmr->it_pid_type);
+		else
+			posixtimer_putref(tmr);
+	}
+}
+#else /* CONFIG_POSIX_TIMERS */
+static inline void posixtimer_sig_ignore(struct task_struct *tsk, struct sigqueue *q) { }
+static inline void posixtimer_sig_unignore(struct task_struct *tsk, int sig) { }
+#endif /* !CONFIG_POSIX_TIMERS */
 
 void do_notify_pidfd(struct task_struct *task)
 {
@@ -2052,19 +2185,16 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 	bool autoreap = false;
 	u64 utime, stime;
 
-	WARN_ON_ONCE(sig == -1);
+	if (WARN_ON_ONCE(!valid_signal(sig)))
+		return false;
 
 	/* do_notify_parent_cldstop should have been called instead.  */
 	WARN_ON_ONCE(task_is_stopped_or_traced(tsk));
 
-	WARN_ON_ONCE(!tsk->ptrace &&
-	       (tsk->group_leader != tsk || !thread_group_empty(tsk)));
-	/*
-	 * tsk is a group leader and has no threads, wake up the
-	 * non-PIDFD_THREAD waiters.
-	 */
-	if (thread_group_empty(tsk))
-		do_notify_pidfd(tsk);
+	WARN_ON_ONCE(!tsk->ptrace && !thread_group_empty(tsk));
+
+	/* ptraced, or group-leader without sub-threads */
+	do_notify_pidfd(tsk);
 
 	if (sig != SIGCHLD) {
 		/*
@@ -2133,11 +2263,15 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
 			sig = 0;
 	}
+	if (!tsk->ptrace && tsk->signal->autoreap) {
+		autoreap = true;
+		sig = 0;
+	}
 	/*
 	 * Send with __send_signal as si_pid and si_uid are in the
 	 * parent's namespaces.
 	 */
-	if (valid_signal(sig) && sig)
+	if (sig)
 		__send_signal_locked(sig, &info, tsk->parent, PIDTYPE_TGID, false);
 	__wake_up_parent(tsk, tsk->parent);
 	spin_unlock_irqrestore(&psig->siglock, flags);
@@ -2696,8 +2830,9 @@ bool get_signal(struct ksignal *ksig)
 
 	/*
 	 * Do this once, we can't return to user-mode if freezing() == T.
-	 * do_signal_stop() and ptrace_stop() do freezable_schedule() and
-	 * thus do not need another check after return.
+	 * do_signal_stop() and ptrace_stop() set TASK_STOPPED/TASK_TRACED
+	 * and the freezer handles those states via TASK_FROZEN, thus they
+	 * do not need another check after return.
 	 */
 	try_to_freeze();
 
@@ -2793,8 +2928,7 @@ relock:
 		type = PIDTYPE_PID;
 		signr = dequeue_synchronous_signal(&ksig->info);
 		if (!signr)
-			signr = dequeue_signal(current, &current->blocked,
-					       &ksig->info, &type);
+			signr = dequeue_signal(&current->blocked, &ksig->info, &type);
 
 		if (!signr)
 			break; /* will return 0 */
@@ -2899,7 +3033,7 @@ relock:
 			 * first and our do_group_exit call below will use
 			 * that value and ignore the one we pass it.
 			 */
-			do_coredump(&ksig->info);
+			vfs_coredump(&ksig->info);
 		}
 
 		/*
@@ -3008,7 +3142,6 @@ void exit_signals(struct task_struct *tsk)
 	cgroup_threadgroup_change_begin(tsk);
 
 	if (thread_group_empty(tsk) || (tsk->signal->flags & SIGNAL_GROUP_EXIT)) {
-		sched_mm_cid_exit_signals(tsk);
 		tsk->flags |= PF_EXITING;
 		cgroup_threadgroup_change_end(tsk);
 		return;
@@ -3019,7 +3152,6 @@ void exit_signals(struct task_struct *tsk)
 	 * From now this task is not visible for group-wide signals,
 	 * see wants_signal(), do_signal_stop().
 	 */
-	sched_mm_cid_exit_signals(tsk);
 	tsk->flags |= PF_EXITING;
 
 	cgroup_threadgroup_change_end(tsk);
@@ -3648,7 +3780,7 @@ static int do_sigtimedwait(const sigset_t *which, kernel_siginfo_t *info,
 	signotset(&mask);
 
 	spin_lock_irq(&tsk->sighand->siglock);
-	sig = dequeue_signal(tsk, &mask, info, &type);
+	sig = dequeue_signal(&mask, info, &type);
 	if (!sig && timeout) {
 		/*
 		 * None ready, temporarily unblock those we're interested
@@ -3667,7 +3799,7 @@ static int do_sigtimedwait(const sigset_t *which, kernel_siginfo_t *info,
 		spin_lock_irq(&tsk->sighand->siglock);
 		__set_task_blocked(tsk, &tsk->real_blocked);
 		sigemptyset(&tsk->real_blocked);
-		sig = dequeue_signal(tsk, &mask, info, &type);
+		sig = dequeue_signal(&mask, info, &type);
 	}
 	spin_unlock_irq(&tsk->sighand->siglock);
 
@@ -3824,6 +3956,15 @@ static void prepare_kill_siginfo(int sig, struct kernel_siginfo *info,
 	info->si_uid = from_kuid_munged(current_user_ns(), current_uid());
 }
 
+/*
+ * Not even root can pretend to send SI_FROMKERNEL() signals.
+ * Nor can they impersonate kill()/tgkill(), which have si_pid/uid
+ */
+static bool si_code_reserved_to_kernel(int si_code)
+{
+	return si_code >= 0 || si_code == SI_TKILL;
+}
+
 /**
  *  sys_kill - send a signal to a process
  *  @pid: the PID of the process
@@ -3831,11 +3972,7 @@ static void prepare_kill_siginfo(int sig, struct kernel_siginfo *info,
  */
 SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
 {
-	struct kernel_siginfo info;
-
-	prepare_kill_siginfo(sig, &info, PIDTYPE_TGID);
-
-	return kill_something_info(sig, &info, pid);
+	return kill_something_info(sig, SEND_SIG_NOINFO, pid);
 }
 
 /*
@@ -3890,6 +4027,47 @@ static struct pid *pidfd_to_pid(const struct file *file)
 	(PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP | \
 	 PIDFD_SIGNAL_PROCESS_GROUP)
 
+static int do_pidfd_send_signal(struct pid *pid, int sig, enum pid_type type,
+				siginfo_t __user *info, unsigned int flags)
+{
+	kernel_siginfo_t kinfo;
+
+	switch (flags) {
+	case PIDFD_SIGNAL_THREAD:
+		type = PIDTYPE_PID;
+		break;
+	case PIDFD_SIGNAL_THREAD_GROUP:
+		type = PIDTYPE_TGID;
+		break;
+	case PIDFD_SIGNAL_PROCESS_GROUP:
+		type = PIDTYPE_PGID;
+		break;
+	}
+
+	if (info) {
+		int ret;
+
+		ret = copy_siginfo_from_user_any(&kinfo, info);
+		if (unlikely(ret))
+			return ret;
+
+		if (unlikely(sig != kinfo.si_signo))
+			return -EINVAL;
+
+		/* Only allow sending arbitrary signals to yourself. */
+		if ((task_pid(current) != pid || type > PIDTYPE_TGID) &&
+		    si_code_reserved_to_kernel(kinfo.si_code))
+			return -EPERM;
+	} else {
+		prepare_kill_siginfo(sig, &kinfo, type);
+	}
+
+	if (type == PIDTYPE_PGID)
+		return kill_pgrp_info(sig, &kinfo, pid);
+
+	return kill_pid_info_type(sig, &kinfo, pid, type);
+}
+
 /**
  * sys_pidfd_send_signal - Signal a process through a pidfd
  * @pidfd:  file descriptor of the process
@@ -3907,11 +4085,9 @@ static struct pid *pidfd_to_pid(const struct file *file)
 SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
 		siginfo_t __user *, info, unsigned int, flags)
 {
-	int ret;
-	struct fd f;
 	struct pid *pid;
-	kernel_siginfo_t kinfo;
 	enum pid_type type;
+	int ret;
 
 	/* Enforce flags be set to 0 until we add an extension. */
 	if (flags & ~PIDFD_SEND_SIGNAL_FLAGS)
@@ -3921,64 +4097,41 @@ SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
 	if (hweight32(flags & PIDFD_SEND_SIGNAL_FLAGS) > 1)
 		return -EINVAL;
 
-	f = fdget(pidfd);
-	if (!f.file)
-		return -EBADF;
+	switch (pidfd) {
+	case PIDFD_SELF_THREAD:
+		pid = get_task_pid(current, PIDTYPE_PID);
+		type = PIDTYPE_PID;
+		break;
+	case PIDFD_SELF_THREAD_GROUP:
+		pid = get_task_pid(current, PIDTYPE_TGID);
+		type = PIDTYPE_TGID;
+		break;
+	default: {
+		CLASS(fd, f)(pidfd);
+		if (fd_empty(f))
+			return -EBADF;
 
-	/* Is this a pidfd? */
-	pid = pidfd_to_pid(f.file);
-	if (IS_ERR(pid)) {
-		ret = PTR_ERR(pid);
-		goto err;
-	}
+		/* Is this a pidfd? */
+		pid = pidfd_to_pid(fd_file(f));
+		if (IS_ERR(pid))
+			return PTR_ERR(pid);
 
-	ret = -EINVAL;
-	if (!access_pidfd_pidns(pid))
-		goto err;
+		if (!access_pidfd_pidns(pid))
+			return -EINVAL;
 
-	switch (flags) {
-	case 0:
 		/* Infer scope from the type of pidfd. */
-		if (f.file->f_flags & PIDFD_THREAD)
+		if (fd_file(f)->f_flags & PIDFD_THREAD)
 			type = PIDTYPE_PID;
 		else
 			type = PIDTYPE_TGID;
-		break;
-	case PIDFD_SIGNAL_THREAD:
-		type = PIDTYPE_PID;
-		break;
-	case PIDFD_SIGNAL_THREAD_GROUP:
-		type = PIDTYPE_TGID;
-		break;
-	case PIDFD_SIGNAL_PROCESS_GROUP:
-		type = PIDTYPE_PGID;
-		break;
+
+		return do_pidfd_send_signal(pid, sig, type, info, flags);
+	}
 	}
 
-	if (info) {
-		ret = copy_siginfo_from_user_any(&kinfo, info);
-		if (unlikely(ret))
-			goto err;
+	ret = do_pidfd_send_signal(pid, sig, type, info, flags);
+	put_pid(pid);
 
-		ret = -EINVAL;
-		if (unlikely(sig != kinfo.si_signo))
-			goto err;
-
-		/* Only allow sending arbitrary signals to yourself. */
-		ret = -EPERM;
-		if ((task_pid(current) != pid || type > PIDTYPE_TGID) &&
-		    (kinfo.si_code >= 0 || kinfo.si_code == SI_TKILL))
-			goto err;
-	} else {
-		prepare_kill_siginfo(sig, &kinfo, type);
-	}
-
-	if (type == PIDTYPE_PGID)
-		ret = kill_pgrp_info(sig, &kinfo, pid);
-	else
-		ret = kill_pid_info_type(sig, &kinfo, pid, type);
-err:
-	fdput(f);
 	return ret;
 }
 
@@ -4058,11 +4211,8 @@ SYSCALL_DEFINE2(tkill, pid_t, pid, int, sig)
 
 static int do_rt_sigqueueinfo(pid_t pid, int sig, kernel_siginfo_t *info)
 {
-	/* Not even root can pretend to send signals from the kernel.
-	 * Nor can they impersonate a kill()/tgkill(), which adds source info.
-	 */
-	if ((info->si_code >= 0 || info->si_code == SI_TKILL) &&
-	    (task_pid_vnr(current) != pid))
+	if (si_code_reserved_to_kernel(info->si_code) &&
+	    task_pid_vnr(current) != pid)
 		return -EPERM;
 
 	/* POSIX.1b doesn't mention process groups.  */
@@ -4105,11 +4255,8 @@ static int do_rt_tgsigqueueinfo(pid_t tgid, pid_t pid, int sig, kernel_siginfo_t
 	if (pid <= 0 || tgid <= 0)
 		return -EINVAL;
 
-	/* Not even root can pretend to send signals from the kernel.
-	 * Nor can they impersonate a kill()/tgkill(), which adds source info.
-	 */
-	if ((info->si_code >= 0 || info->si_code == SI_TKILL) &&
-	    (task_pid_vnr(current) != pid))
+	if (si_code_reserved_to_kernel(info->si_code) &&
+	    task_pid_vnr(current) != pid)
 		return -EPERM;
 
 	return do_send_specific(tgid, pid, sig, info);
@@ -4153,8 +4300,8 @@ void kernel_sigaction(int sig, __sighandler_t action)
 		sigemptyset(&mask);
 		sigaddset(&mask, sig);
 
-		flush_sigqueue_mask(&mask, &current->signal->shared_pending);
-		flush_sigqueue_mask(&mask, &current->pending);
+		flush_sigqueue_mask(current, &mask, &current->signal->shared_pending);
+		flush_sigqueue_mask(current, &mask, &current->pending);
 		recalc_sigpending();
 	}
 	spin_unlock_irq(&current->sighand->siglock);
@@ -4204,6 +4351,8 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 	sigaction_compat_abi(act, oact);
 
 	if (act) {
+		bool was_ignored = k->sa.sa_handler == SIG_IGN;
+
 		sigdelsetmask(&act->sa.sa_mask,
 			      sigmask(SIGKILL) | sigmask(SIGSTOP));
 		*k = *act;
@@ -4221,9 +4370,11 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 		if (sig_handler_ignored(sig_handler(p, sig), sig)) {
 			sigemptyset(&mask);
 			sigaddset(&mask, sig);
-			flush_sigqueue_mask(&mask, &p->signal->shared_pending);
+			flush_sigqueue_mask(p, &mask, &p->signal->shared_pending);
 			for_each_thread(p, t)
-				flush_sigqueue_mask(&mask, &t->pending);
+				flush_sigqueue_mask(p, &mask, &t->pending);
+		} else if (was_ignored) {
+			posixtimer_sig_unignore(p, sig);
 		}
 	}
 
@@ -4836,7 +4987,7 @@ static inline void siginfo_buildtime_checks(void)
 }
 
 #if defined(CONFIG_SYSCTL)
-static struct ctl_table signal_debug_table[] = {
+static const struct ctl_table signal_debug_table[] = {
 #ifdef CONFIG_SYSCTL_EXCEPTION_TRACE
 	{
 		.procname	= "exception-trace",
@@ -4848,9 +4999,20 @@ static struct ctl_table signal_debug_table[] = {
 #endif
 };
 
+static const struct ctl_table signal_table[] = {
+	{
+		.procname	= "print-fatal-signals",
+		.data		= &print_fatal_signals,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+};
+
 static int __init init_signal_sysctls(void)
 {
 	register_sysctl_init("debug", signal_debug_table);
+	register_sysctl_init("kernel", signal_table);
 	return 0;
 }
 early_initcall(init_signal_sysctls);

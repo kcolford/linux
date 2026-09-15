@@ -16,6 +16,14 @@
  * mi  - MFT inode               - One MFT record(usually 1024 bytes or 4K), consists of attributes.
  * ni  - NTFS inode              - Extends linux inode. consists of one or more mft inodes.
  * index - unit inside directory - 2K, 4K, <=page size, does not depend on cluster size.
+ * resident attribute            - Attribute with content stored directly in the MFT record
+ * non-resident attribute        - Attribute with content stored in clusters
+ * data_size                     - Size of attribute content in bytes. Equal to inode->i_size
+ * valid_size                    - Number of bytes written to the non-resident attribute
+ * allocated_size                - Total size of clusters allocated for non-resident content
+ * total_size                    - Actual size of allocated clusters for sparse or compressed attributes
+ *                               - Constraint: valid_size <= data_size <= allocated_size
+ * ADS                           - Alternative data stream: Named data attribute (0x80)
  *
  * WSL - Windows Subsystem for Linux
  * https://docs.microsoft.com/en-us/windows/wsl/file-permissions
@@ -53,10 +61,12 @@
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
+#include <linux/fs_struct.h>
 #include <linux/log2.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/nls.h>
+#include <linux/overflow.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/statfs.h>
@@ -90,7 +100,7 @@ void ntfs_printk(const struct super_block *sb, const char *fmt, ...)
 	level = printk_get_level(fmt);
 	vaf.fmt = printk_skip_level(fmt);
 	vaf.va = &args;
-	printk("%c%cntfs3: %s: %pV\n", KERN_SOH_ASCII, level, sb->s_id, &vaf);
+	printk("%c%cntfs3(%s): %pV\n", KERN_SOH_ASCII, level, sb->s_id, &vaf);
 
 	va_end(args);
 }
@@ -124,10 +134,15 @@ void ntfs_inode_printk(struct inode *inode, const char *fmt, ...)
 		struct dentry *de = d_find_alias(inode);
 
 		if (de) {
+			int len;
 			spin_lock(&de->d_lock);
-			snprintf(name, sizeof(s_name_buf), " \"%s\"",
-				 de->d_name.name);
+			len = snprintf(name, sizeof(s_name_buf), " \"%s\"",
+				       de->d_name.name);
 			spin_unlock(&de->d_lock);
+			if (len <= 0)
+				name[0] = 0;
+			else if (len >= sizeof(s_name_buf))
+				name[sizeof(s_name_buf) - 1] = 0;
 		} else {
 			name[0] = 0;
 		}
@@ -140,7 +155,7 @@ void ntfs_inode_printk(struct inode *inode, const char *fmt, ...)
 	vaf.fmt = printk_skip_level(fmt);
 	vaf.va = &args;
 
-	printk("%c%cntfs3: %s: ino=%lx,%s %pV\n", KERN_SOH_ASCII, level,
+	printk("%c%cntfs3(%s): ino=%llx,%s %pV\n", KERN_SOH_ASCII, level,
 	       sb->s_id, inode->i_ino, name ? name : "", &vaf);
 
 	va_end(args);
@@ -251,31 +266,43 @@ enum Opt {
 	Opt_windows_names,
 	Opt_showmeta,
 	Opt_acl,
+	Opt_acl_bool,
 	Opt_iocharset,
 	Opt_prealloc,
+	Opt_prealloc_bool,
 	Opt_nocase,
+	Opt_delalloc,
+	Opt_delalloc_bool,
+	Opt_ads,
+	Opt_ads_bool,
 	Opt_err,
 };
 
 // clang-format off
 static const struct fs_parameter_spec ntfs_fs_parameters[] = {
-	fsparam_uid("uid",			Opt_uid),
-	fsparam_gid("gid",			Opt_gid),
-	fsparam_u32oct("umask",			Opt_umask),
-	fsparam_u32oct("dmask",			Opt_dmask),
-	fsparam_u32oct("fmask",			Opt_fmask),
-	fsparam_flag_no("sys_immutable",	Opt_immutable),
-	fsparam_flag_no("discard",		Opt_discard),
-	fsparam_flag_no("force",		Opt_force),
-	fsparam_flag_no("sparse",		Opt_sparse),
-	fsparam_flag_no("hidden",		Opt_nohidden),
-	fsparam_flag_no("hide_dot_files",	Opt_hide_dot_files),
-	fsparam_flag_no("windows_names",	Opt_windows_names),
-	fsparam_flag_no("showmeta",		Opt_showmeta),
-	fsparam_flag_no("acl",			Opt_acl),
-	fsparam_string("iocharset",		Opt_iocharset),
-	fsparam_flag_no("prealloc",		Opt_prealloc),
-	fsparam_flag_no("nocase",		Opt_nocase),
+	fsparam_uid("uid",		Opt_uid),
+	fsparam_gid("gid",		Opt_gid),
+	fsparam_u32oct("umask",		Opt_umask),
+	fsparam_u32oct("dmask",		Opt_dmask),
+	fsparam_u32oct("fmask",		Opt_fmask),
+	fsparam_flag("sys_immutable",	Opt_immutable),
+	fsparam_flag("discard",		Opt_discard),
+	fsparam_flag("force",		Opt_force),
+	fsparam_flag("sparse",		Opt_sparse),
+	fsparam_flag("nohidden",	Opt_nohidden),
+	fsparam_flag("hide_dot_files",	Opt_hide_dot_files),
+	fsparam_flag("windows_names",	Opt_windows_names),
+	fsparam_flag("showmeta",	Opt_showmeta),
+	fsparam_flag("acl",		Opt_acl),
+	fsparam_bool("acl",		Opt_acl_bool),
+	fsparam_string("iocharset",	Opt_iocharset),
+	fsparam_flag("prealloc",	Opt_prealloc),
+	fsparam_bool("prealloc",	Opt_prealloc_bool),
+	fsparam_flag("nocase",		Opt_nocase),
+	fsparam_flag("delalloc",	Opt_delalloc),
+	fsparam_bool("delalloc",	Opt_delalloc_bool),
+	fsparam_flag("ads",		Opt_ads),
+	fsparam_bool("ads",		Opt_ads_bool),
 	{}
 };
 // clang-format on
@@ -283,10 +310,8 @@ static const struct fs_parameter_spec ntfs_fs_parameters[] = {
 /*
  * Load nls table or if @nls is utf8 then return NULL.
  *
- * It is good idea to use here "const char *nls".
- * But load_nls accepts "char*".
  */
-static struct nls_table *ntfs_load_nls(char *nls)
+static struct nls_table *ntfs_load_nls(const char *nls)
 {
 	struct nls_table *ret;
 
@@ -345,38 +370,40 @@ static int ntfs_fs_parse_param(struct fs_context *fc,
 		opts->fmask = 1;
 		break;
 	case Opt_immutable:
-		opts->sys_immutable = result.negated ? 0 : 1;
+		opts->sys_immutable = 1;
 		break;
 	case Opt_discard:
-		opts->discard = result.negated ? 0 : 1;
+		opts->discard = 1;
 		break;
 	case Opt_force:
-		opts->force = result.negated ? 0 : 1;
+		opts->force = 1;
 		break;
 	case Opt_sparse:
-		opts->sparse = result.negated ? 0 : 1;
+		opts->sparse = 1;
 		break;
 	case Opt_nohidden:
-		opts->nohidden = result.negated ? 1 : 0;
+		opts->nohidden = 1;
 		break;
 	case Opt_hide_dot_files:
-		opts->hide_dot_files = result.negated ? 0 : 1;
+		opts->hide_dot_files = 1;
 		break;
 	case Opt_windows_names:
-		opts->windows_names = result.negated ? 0 : 1;
+		opts->windows_names = 1;
 		break;
 	case Opt_showmeta:
-		opts->showmeta = result.negated ? 0 : 1;
+		opts->showmeta = 1;
 		break;
-	case Opt_acl:
-		if (!result.negated)
+	case Opt_acl_bool:
+		if (result.boolean) {
+			fallthrough;
+		case Opt_acl:
 #ifdef CONFIG_NTFS3_FS_POSIX_ACL
 			fc->sb_flags |= SB_POSIXACL;
 #else
 			return invalf(
 				fc, "ntfs3: Support for ACL not compiled in!");
 #endif
-		else
+		} else
 			fc->sb_flags &= ~SB_POSIXACL;
 		break;
 	case Opt_iocharset:
@@ -385,10 +412,25 @@ static int ntfs_fs_parse_param(struct fs_context *fc,
 		param->string = NULL;
 		break;
 	case Opt_prealloc:
-		opts->prealloc = result.negated ? 0 : 1;
+		opts->prealloc = 1;
+		break;
+	case Opt_prealloc_bool:
+		opts->prealloc = result.boolean;
 		break;
 	case Opt_nocase:
-		opts->nocase = result.negated ? 1 : 0;
+		opts->nocase = 1;
+		break;
+	case Opt_delalloc:
+		opts->delalloc = 1;
+		break;
+	case Opt_delalloc_bool:
+		opts->delalloc = result.boolean;
+		break;
+	case Opt_ads:
+		opts->ads = 1;
+		break;
+	case Opt_ads_bool:
+		opts->ads = result.boolean;
 		break;
 	default:
 		/* Should not be here unless we forget add case. */
@@ -403,12 +445,6 @@ static int ntfs_fs_reconfigure(struct fs_context *fc)
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	struct ntfs_mount_options *new_opts = fc->fs_private;
 	int ro_rw;
-
-	/* If ntfs3 is used as legacy ntfs enforce read-only mode. */
-	if (is_legacy_ntfs(sb)) {
-		fc->sb_flags |= SB_RDONLY;
-		goto out;
-	}
 
 	ro_rw = sb_rdonly(sb) && !(fc->sb_flags & SB_RDONLY);
 	if (ro_rw && (sbi->flags & NTFS_FLAGS_NEED_REPLAY)) {
@@ -436,7 +472,6 @@ static int ntfs_fs_reconfigure(struct fs_context *fc)
 		return -EINVAL;
 	}
 
-out:
 	sync_filesystem(sb);
 	swap(sbi->options, fc->fs_private);
 
@@ -464,7 +499,7 @@ static int ntfs3_volinfo(struct seq_file *m, void *o)
 	struct super_block *sb = m->private;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 
-	seq_printf(m, "ntfs%d.%d\n%u\n%zu\n\%zu\n%zu\n%s\n%s\n",
+	seq_printf(m, "ntfs%d.%d\n%u\n%zu\n%zu\n%zu\n%s\n%s\n",
 		   sbi->volume.major_ver, sbi->volume.minor_ver,
 		   sbi->cluster_size, sbi->used.bitmap.nbits,
 		   sbi->mft.bitmap.nbits,
@@ -550,6 +585,55 @@ static const struct proc_ops ntfs3_label_fops = {
 	.proc_write = ntfs3_label_write,
 };
 
+static void ntfs_create_procdir(struct super_block *sb)
+{
+	struct proc_dir_entry *e;
+
+	if (!proc_info_root)
+		return;
+
+	e = proc_mkdir(sb->s_id, proc_info_root);
+	if (e) {
+		struct ntfs_sb_info *sbi = sb->s_fs_info;
+
+		proc_create_data("volinfo", 0444, e, &ntfs3_volinfo_fops, sb);
+		proc_create_data("label", 0644, e, &ntfs3_label_fops, sb);
+		sbi->procdir = e;
+	}
+}
+
+static void ntfs_remove_procdir(struct super_block *sb)
+{
+	struct ntfs_sb_info *sbi = sb->s_fs_info;
+
+	if (!sbi->procdir)
+		return;
+
+	remove_proc_entry("label", sbi->procdir);
+	remove_proc_entry("volinfo", sbi->procdir);
+	remove_proc_entry(sb->s_id, proc_info_root);
+	sbi->procdir = NULL;
+}
+
+static void ntfs_create_proc_root(void)
+{
+	proc_info_root = proc_mkdir("fs/ntfs3", NULL);
+}
+
+static void ntfs_remove_proc_root(void)
+{
+	if (proc_info_root) {
+		remove_proc_entry("fs/ntfs3", NULL);
+		proc_info_root = NULL;
+	}
+}
+#else
+// clang-format off
+static void ntfs_create_procdir(struct super_block *sb){}
+static void ntfs_remove_procdir(struct super_block *sb){}
+static void ntfs_create_proc_root(void){}
+static void ntfs_remove_proc_root(void){}
+// clang-format on
 #endif
 
 static struct kmem_cache *ntfs_inode_cachep;
@@ -614,7 +698,7 @@ static noinline void ntfs3_put_sbi(struct ntfs_sb_info *sbi)
 		sbi->volume.ni = NULL;
 	}
 
-	ntfs_update_mftmirr(sbi, 0);
+	ntfs_update_mftmirr(sbi);
 
 	indx_clear(&sbi->security.index_sii);
 	indx_clear(&sbi->security.index_sdh);
@@ -639,18 +723,16 @@ static void ntfs_put_super(struct super_block *sb)
 {
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 
-#ifdef CONFIG_PROC_FS
-	// Remove /proc/fs/ntfs3/..
-	if (sbi->procdir) {
-		remove_proc_entry("label", sbi->procdir);
-		remove_proc_entry("volinfo", sbi->procdir);
-		remove_proc_entry(sb->s_id, proc_info_root);
-		sbi->procdir = NULL;
-	}
-#endif
+	ntfs_remove_procdir(sb);
 
 	/* Mark rw ntfs as clear, if possible. */
 	ntfs_set_state(sbi, NTFS_DIRTY_CLEAR);
+
+	if (sbi->options) {
+		put_mount_options(sbi->options);
+		sbi->options = NULL;
+	}
+
 	ntfs3_put_sbi(sbi);
 }
 
@@ -659,14 +741,22 @@ static int ntfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct super_block *sb = dentry->d_sb;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	struct wnd_bitmap *wnd = &sbi->used.bitmap;
+	CLST da_clusters = ntfs_get_da(sbi);
 
 	buf->f_type = sb->s_magic;
-	buf->f_bsize = sbi->cluster_size;
+	buf->f_bsize = buf->f_frsize = sbi->cluster_size;
 	buf->f_blocks = wnd->nbits;
 
-	buf->f_bfree = buf->f_bavail = wnd_zeroes(wnd);
+	buf->f_bfree = wnd_zeroes(wnd);
+	if (buf->f_bfree > da_clusters) {
+		buf->f_bfree -= da_clusters;
+	} else {
+		buf->f_bfree = 0;
+	}
+	buf->f_bavail = buf->f_bfree;
+
 	buf->f_fsid.val[0] = sbi->volume.ser_num;
-	buf->f_fsid.val[1] = (sbi->volume.ser_num >> 32);
+	buf->f_fsid.val[1] = sbi->volume.ser_num >> 32;
 	buf->f_namelen = NTFS_NAME_LEN;
 
 	return 0;
@@ -711,6 +801,10 @@ static int ntfs_show_options(struct seq_file *m, struct dentry *root)
 		seq_puts(m, ",prealloc");
 	if (opts->nocase)
 		seq_puts(m, ",nocase");
+	if (opts->delalloc)
+		seq_puts(m, ",delalloc");
+	if (opts->ads)
+		seq_puts(m, ",ads");
 
 	return 0;
 }
@@ -763,7 +857,12 @@ static int ntfs_sync_fs(struct super_block *sb, int wait)
 	if (!err)
 		ntfs_set_state(sbi, NTFS_DIRTY_CLEAR);
 
-	ntfs_update_mftmirr(sbi, wait);
+	ntfs_update_mftmirr(sbi);
+
+	if (wait) {
+		sync_blockdev(sb->s_bdev);
+		blkdev_issue_flush(sb->s_bdev);
+	}
 
 	return err;
 }
@@ -872,7 +971,7 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	int err;
 	u32 mb, gb, boot_sector_size, sct_per_clst, record_size;
-	u64 sectors, clusters, mlcn, mlcn2, dev_size0;
+	u64 sectors, clusters, mlcn, mlcn2, mft_pos, mft2_pos, dev_size0;
 	struct NTFS_BOOT *boot;
 	struct buffer_head *bh;
 	struct MFT_REC *rec;
@@ -886,6 +985,11 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	dev_size0 = dev_size;
 
 	sbi->volume.blocks = dev_size >> PAGE_SHIFT;
+
+	/* Set dummy blocksize to read boot_block. */
+	if (!sb_min_blocksize(sb, PAGE_SIZE)) {
+		return -EINVAL;
+	}
 
 read_boot:
 	bh = ntfs_bread(sb, boot_block);
@@ -936,7 +1040,15 @@ read_boot:
 	mlcn2 = le64_to_cpu(boot->mft2_clst);
 	sectors = le64_to_cpu(boot->sectors_per_volume);
 
-	if (mlcn * sct_per_clst >= sectors || mlcn2 * sct_per_clst >= sectors) {
+	/*
+	 * Convert mlcn/mlcn2 to sector positions before comparing with
+	 * 'sectors'.  All three are u64 values that come from the boot
+	 * sector, so use check_mul_overflow() to keep a wraparound from
+	 * silently bypassing the comparison.
+	 */
+	if (check_mul_overflow(mlcn, (u64)sct_per_clst, &mft_pos) ||
+	    check_mul_overflow(mlcn2, (u64)sct_per_clst, &mft2_pos) ||
+	    mft_pos >= sectors || mft2_pos >= sectors) {
 		ntfs_err(
 			sb,
 			"%s: start of MFT 0x%llx (0x%llx) is out of volume 0x%llx.",
@@ -1011,6 +1123,7 @@ read_boot:
 		dev_size += sector_size - 1;
 	}
 
+	sbi->bdev_blocksize = max(boot_sector_size, sector_size);
 	sbi->mft.lbo = mlcn << cluster_bits;
 	sbi->mft.lbo2 = mlcn2 << cluster_bits;
 
@@ -1083,7 +1196,10 @@ read_boot:
 	rec->total = cpu_to_le32(sbi->record_size);
 	((struct ATTRIB *)Add2Ptr(rec, ao))->type = ATTR_END;
 
-	sb_set_blocksize(sb, min_t(u32, sbi->cluster_size, PAGE_SIZE));
+	if (!sb_set_blocksize(sb, min_t(u32, sbi->cluster_size, PAGE_SIZE))) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	sbi->block_mask = sb->s_blocksize - 1;
 	sbi->blocks_per_cluster = sbi->cluster_size >> sb->s_blocksize_bits;
@@ -1095,7 +1211,7 @@ read_boot:
 #ifdef CONFIG_NTFS3_64BIT_CLUSTER
 	if (clusters >= (1ull << (64 - cluster_bits)))
 		sbi->maxbytes = -1;
-	sbi->maxbytes_sparse = -1;
+	sbi->maxbytes_sparse = MAX_LFS_FILESIZE;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 #else
 	/* Maximum size for sparse file. */
@@ -1134,7 +1250,8 @@ out:
 			/*
 			 * Try alternative boot (last sector)
 			 */
-			sb_set_blocksize(sb, block_size);
+			if (!sb_set_blocksize(sb, block_size))
+				return -EINVAL;
 			hint = "Alternative boot";
 			dev_size = dev_size0; /* restore original size. */
 			goto read_boot;
@@ -1152,14 +1269,15 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	int err;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	struct block_device *bdev = sb->s_bdev;
-	struct ntfs_mount_options *options;
+	struct ntfs_mount_options *fc_opts;
+	struct ntfs_mount_options *options = NULL;
 	struct inode *inode;
 	struct ntfs_inode *ni;
 	size_t i, tt, bad_len, bad_frags;
 	CLST vcn, lcn, len;
 	struct ATTRIB *attr;
 	const struct VOLUME_INFO *info;
-	u32 idx, done, bytes;
+	u32 done, bytes;
 	struct ATTR_DEF_ENTRY *t;
 	u16 *shared;
 	struct MFT_REF ref;
@@ -1169,15 +1287,30 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	ref.high = 0;
 
 	sbi->sb = sb;
-	sbi->options = options = fc->fs_private;
-	fc->fs_private = NULL;
+	fc_opts = fc->fs_private;
+	if (!fc_opts) {
+		errorf(fc, "missing mount options");
+		return -EINVAL;
+	}
+	options = kmemdup(fc_opts, sizeof(*fc_opts), GFP_KERNEL);
+	if (!options)
+		return -ENOMEM;
+
+	if (fc_opts->nls_name) {
+		options->nls_name = kstrdup(fc_opts->nls_name, GFP_KERNEL);
+		if (!options->nls_name) {
+			kfree(options);
+			return -ENOMEM;
+		}
+	}
+	sbi->options = options;
 	sb->s_flags |= SB_NODIRATIME;
 	sb->s_magic = 0x7366746e; // "ntfs"
 	sb->s_op = &ntfs_sops;
 	sb->s_export_op = &ntfs_export_ops;
 	sb->s_time_gran = NTFS_TIME_GRAN; // 100 nsec
 	sb->s_xattr = ntfs_xattr_handlers;
-	sb->s_d_op = options->nocase ? &ntfs_dentry_ops : NULL;
+	set_default_d_op(sb, options->nocase ? &ntfs_dentry_ops : NULL);
 
 	options->nls = ntfs_load_nls(options->nls_name);
 	if (IS_ERR(options->nls)) {
@@ -1201,7 +1334,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	/*
 	 * Load $Volume. This should be done before $LogFile
-	 * 'cause 'sbi->volume.ni' is used 'ntfs_set_state'.
+	 * 'cause 'sbi->volume.ni' is used in 'ntfs_set_state'.
 	 */
 	ref.low = cpu_to_le32(MFT_REC_VOL);
 	ref.seq = cpu_to_le16(MFT_REC_VOL);
@@ -1225,8 +1358,13 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 				      le32_to_cpu(attr->res.data_size) >> 1,
 				      UTF16_LITTLE_ENDIAN, sbi->volume.label,
 				      sizeof(sbi->volume.label));
-		if (err < 0)
+		if (err < 0) {
 			sbi->volume.label[0] = 0;
+		} else if (err >= sizeof(sbi->volume.label)) {
+			sbi->volume.label[sizeof(sbi->volume.label) - 1] = 0;
+		} else {
+			sbi->volume.label[err] = 0;
+		}
 	} else {
 		/* Should we break mounting here? */
 		//err = -EINVAL;
@@ -1247,7 +1385,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sbi->volume.ni = ni;
 	if (info->flags & VOLUME_FLAG_DIRTY) {
 		sbi->volume.real_dirty = true;
-		ntfs_info(sb, "It is recommened to use chkdsk.");
+		ntfs_info(sb, "It is recommended to use chkdsk.");
 	}
 
 	/* Load $MFTMirr to estimate recs_mirr. */
@@ -1312,15 +1450,49 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	tt = inode->i_size >> sbi->record_bits;
 	sbi->mft.next_free = MFT_REC_USER;
 
-	err = wnd_init(&sbi->mft.bitmap, sb, tt);
-	if (err)
-		goto put_inode_out;
-
 	err = ni_load_all_mi(ni);
 	if (err) {
 		ntfs_err(sb, "Failed to load $MFT's subrecords (%d).", err);
 		goto put_inode_out;
 	}
+
+	/* Merge MFT bitmap runs from extent records loaded by ni_load_all_mi. */
+	{
+		struct ATTRIB *a = NULL;
+		struct ATTR_LIST_ENTRY *le = NULL;
+
+		while ((a = ni_enum_attr_ex(ni, a, &le, NULL))) {
+			CLST svcn, evcn;
+			u16 roff;
+
+			if (a->type != ATTR_BITMAP || !a->non_res)
+				continue;
+
+			svcn = le64_to_cpu(a->nres.svcn);
+			if (!svcn)
+				continue; /* Base record runs already loaded. */
+
+			evcn = le64_to_cpu(a->nres.evcn);
+			roff = le16_to_cpu(a->nres.run_off);
+
+			err = run_unpack_ex(&sbi->mft.bitmap.run, sbi,
+					    MFT_REC_MFT, svcn, evcn, svcn,
+					    Add2Ptr(a, roff),
+					    le32_to_cpu(a->size) - roff);
+			if (err < 0) {
+				ntfs_err(
+					sb,
+					"Failed to unpack $MFT bitmap extent (%d).",
+					err);
+				goto put_inode_out;
+			}
+			err = 0;
+		}
+	}
+
+	err = wnd_init(&sbi->mft.bitmap, sb, tt);
+	if (err)
+		goto put_inode_out;
 
 	sbi->mft.ni = ni;
 
@@ -1431,31 +1603,22 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto put_inode_out;
 	}
 
-	for (done = idx = 0; done < bytes; done += PAGE_SIZE, idx++) {
-		unsigned long tail = bytes - done;
-		struct page *page = ntfs_map_page(inode->i_mapping, idx);
+	/* Read the entire file. */
+	err = inode_read_data(inode, sbi->def_table, bytes);
+	if (err) {
+		ntfs_err(sb, "Failed to read $AttrDef (%d).", err);
+		goto put_inode_out;
+	}
 
-		if (IS_ERR(page)) {
-			err = PTR_ERR(page);
-			ntfs_err(sb, "Failed to read $AttrDef (%d).", err);
-			goto put_inode_out;
-		}
-		memcpy(Add2Ptr(t, done), page_address(page),
-		       min(PAGE_SIZE, tail));
-		ntfs_unmap_page(page);
-
-		if (!idx && ATTR_STD != t->type) {
-			ntfs_err(sb, "$AttrDef is corrupted.");
-			err = -EINVAL;
-			goto put_inode_out;
-		}
+	if (ATTR_STD != t->type) {
+		ntfs_err(sb, "$AttrDef is corrupted.");
+		err = -EINVAL;
+		goto put_inode_out;
 	}
 
 	t += 1;
 	sbi->def_entries = 1;
 	done = sizeof(struct ATTR_DEF_ENTRY);
-	sbi->reparse.max_size = MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
-	sbi->ea_max_size = 0x10000; /* default formatter value */
 
 	while (done + sizeof(struct ATTR_DEF_ENTRY) <= bytes) {
 		u32 t32 = le32_to_cpu(t->type);
@@ -1491,27 +1654,21 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto put_inode_out;
 	}
 
-	for (idx = 0; idx < (0x10000 * sizeof(short) >> PAGE_SHIFT); idx++) {
-		const __le16 *src;
-		u16 *dst = Add2Ptr(sbi->upcase, idx << PAGE_SHIFT);
-		struct page *page = ntfs_map_page(inode->i_mapping, idx);
-
-		if (IS_ERR(page)) {
-			err = PTR_ERR(page);
-			ntfs_err(sb, "Failed to read $UpCase (%d).", err);
-			goto put_inode_out;
-		}
-
-		src = page_address(page);
+	/* Read the entire file. */
+	err = inode_read_data(inode, sbi->upcase, 0x10000 * sizeof(short));
+	if (err) {
+		ntfs_err(sb, "Failed to read $UpCase (%d).", err);
+		goto put_inode_out;
+	}
 
 #ifdef __BIG_ENDIAN
-		for (i = 0; i < PAGE_SIZE / sizeof(u16); i++)
-			*dst++ = le16_to_cpu(*src++);
-#else
-		memcpy(dst, src, PAGE_SIZE);
-#endif
-		ntfs_unmap_page(page);
+	{
+		u16 *dst = sbi->upcase;
+
+		for (i = 0; i < 0x10000; i++)
+			__swab16s(dst++);
 	}
+#endif
 
 	shared = ntfs_set_shared(sbi->upcase, 0x10000 * sizeof(short));
 	if (shared && sbi->upcase != shared) {
@@ -1574,7 +1731,7 @@ load_root:
 	sb->s_root = d_make_root(inode);
 	if (!sb->s_root) {
 		err = -ENOMEM;
-		goto put_inode_out;
+		goto out;
 	}
 
 	if (boot2) {
@@ -1584,9 +1741,7 @@ load_root:
 		 */
 		struct buffer_head *bh0 = sb_getblk(sb, 0);
 		if (bh0) {
-			if (buffer_locked(bh0))
-				__wait_on_buffer(bh0);
-
+			wait_on_buffer(bh0);
 			lock_buffer(bh0);
 			memcpy(bh0->b_data, boot2, sizeof(*boot2));
 			set_buffer_uptodate(bh0);
@@ -1600,31 +1755,21 @@ load_root:
 		kfree(boot2);
 	}
 
-#ifdef CONFIG_PROC_FS
-	/* Create /proc/fs/ntfs3/.. */
-	if (proc_info_root) {
-		struct proc_dir_entry *e = proc_mkdir(sb->s_id, proc_info_root);
-		static_assert((S_IRUGO | S_IWUSR) == 0644);
-		if (e) {
-			proc_create_data("volinfo", S_IRUGO, e,
-					 &ntfs3_volinfo_fops, sb);
-			proc_create_data("label", S_IRUGO | S_IWUSR, e,
-					 &ntfs3_label_fops, sb);
-			sbi->procdir = e;
-		}
-	}
-#endif
+	ntfs_create_procdir(sb);
 
-	if (is_legacy_ntfs(sb))
-		sb->s_flags |= SB_RDONLY;
 	return 0;
 
 put_inode_out:
 	iput(inode);
 out:
+	/* sbi->options == options */
+	if (options) {
+		put_mount_options(sbi->options);
+		sbi->options = NULL;
+	}
+
 	ntfs3_put_sbi(sbi);
 	kfree(boot2);
-	ntfs3_put_sbi(sbi);
 	return err;
 }
 
@@ -1734,25 +1879,31 @@ static const struct fs_context_operations ntfs_context_ops = {
  * This will called when mount/remount. We will first initialize
  * options so that if remount we can use just that.
  */
-static int __ntfs_init_fs_context(struct fs_context *fc)
+static int ntfs_init_fs_context(struct fs_context *fc)
 {
 	struct ntfs_mount_options *opts;
 	struct ntfs_sb_info *sbi;
 
-	opts = kzalloc(sizeof(struct ntfs_mount_options), GFP_NOFS);
+	opts = kzalloc_obj(struct ntfs_mount_options, GFP_NOFS);
 	if (!opts)
 		return -ENOMEM;
 
 	/* Default options. */
 	opts->fs_uid = current_uid();
 	opts->fs_gid = current_gid();
-	opts->fs_fmask_inv = ~current_umask();
-	opts->fs_dmask_inv = ~current_umask();
+	opts->fs_fmask_inv = opts->fs_dmask_inv = ~current_umask();
+	opts->prealloc = 1;
+	opts->ads = 1;
+
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
+	/* Set the default value 'acl' */
+	fc->sb_flags |= SB_POSIXACL;
+#endif
 
 	if (fc->purpose == FS_CONTEXT_FOR_RECONFIGURE)
 		goto ok;
 
-	sbi = kzalloc(sizeof(struct ntfs_sb_info), GFP_NOFS);
+	sbi = kzalloc_obj(struct ntfs_sb_info, GFP_NOFS);
 	if (!sbi)
 		goto free_opts;
 
@@ -1782,11 +1933,6 @@ free_opts:
 	return -ENOMEM;
 }
 
-static int ntfs_init_fs_context(struct fs_context *fc)
-{
-	return __ntfs_init_fs_context(fc);
-}
-
 static void ntfs3_kill_sb(struct super_block *sb)
 {
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
@@ -1807,50 +1953,6 @@ static struct file_system_type ntfs_fs_type = {
 	.kill_sb		= ntfs3_kill_sb,
 	.fs_flags		= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
 };
-
-#if IS_ENABLED(CONFIG_NTFS_FS)
-static int ntfs_legacy_init_fs_context(struct fs_context *fc)
-{
-	int ret;
-
-	ret = __ntfs_init_fs_context(fc);
-	/* If ntfs3 is used as legacy ntfs enforce read-only mode. */
-	fc->sb_flags |= SB_RDONLY;
-	return ret;
-}
-
-static struct file_system_type ntfs_legacy_fs_type = {
-	.owner			= THIS_MODULE,
-	.name			= "ntfs",
-	.init_fs_context	= ntfs_legacy_init_fs_context,
-	.parameters		= ntfs_fs_parameters,
-	.kill_sb		= ntfs3_kill_sb,
-	.fs_flags		= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
-};
-MODULE_ALIAS_FS("ntfs");
-
-static inline void register_as_ntfs_legacy(void)
-{
-	int err = register_filesystem(&ntfs_legacy_fs_type);
-	if (err)
-		pr_warn("ntfs3: Failed to register legacy ntfs filesystem driver: %d\n", err);
-}
-
-static inline void unregister_as_ntfs_legacy(void)
-{
-	unregister_filesystem(&ntfs_legacy_fs_type);
-}
-bool is_legacy_ntfs(struct super_block *sb)
-{
-	return sb->s_type == &ntfs_legacy_fs_type;
-}
-#else
-static inline void register_as_ntfs_legacy(void) {}
-static inline void unregister_as_ntfs_legacy(void) {}
-bool is_legacy_ntfs(struct super_block *sb) { return false; }
-#endif
-
-
 // clang-format on
 
 static int __init init_ntfs_fs(void)
@@ -1865,25 +1967,20 @@ static int __init init_ntfs_fs(void)
 	if (IS_ENABLED(CONFIG_NTFS3_LZX_XPRESS))
 		pr_info("ntfs3: Read-only LZX/Xpress compression included\n");
 
-#ifdef CONFIG_PROC_FS
-	/* Create "/proc/fs/ntfs3" */
-	proc_info_root = proc_mkdir("fs/ntfs3", NULL);
-#endif
+	ntfs_create_proc_root();
 
 	err = ntfs3_init_bitmap();
 	if (err)
-		return err;
+		goto out2;
 
 	ntfs_inode_cachep = kmem_cache_create(
 		"ntfs_inode_cache", sizeof(struct ntfs_inode), 0,
-		(SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT),
-		init_once);
+		(SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT), init_once);
 	if (!ntfs_inode_cachep) {
 		err = -ENOMEM;
 		goto out1;
 	}
 
-	register_as_ntfs_legacy();
 	err = register_filesystem(&ntfs_fs_type);
 	if (err)
 		goto out;
@@ -1893,6 +1990,8 @@ out:
 	kmem_cache_destroy(ntfs_inode_cachep);
 out1:
 	ntfs3_exit_bitmap();
+out2:
+	ntfs_remove_proc_root();
 	return err;
 }
 
@@ -1901,13 +2000,8 @@ static void __exit exit_ntfs_fs(void)
 	rcu_barrier();
 	kmem_cache_destroy(ntfs_inode_cachep);
 	unregister_filesystem(&ntfs_fs_type);
-	unregister_as_ntfs_legacy();
 	ntfs3_exit_bitmap();
-
-#ifdef CONFIG_PROC_FS
-	if (proc_info_root)
-		remove_proc_entry("fs/ntfs3", NULL);
-#endif
+	ntfs_remove_proc_root();
 }
 
 MODULE_LICENSE("GPL");

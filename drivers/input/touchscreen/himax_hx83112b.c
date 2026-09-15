@@ -130,17 +130,6 @@ static int himax_bus_read(struct himax_ts_data *ts, u32 address, void *dst,
 	return 0;
 }
 
-static int himax_read_mcu(struct himax_ts_data *ts, u32 address, u32 *dst)
-{
-	int error;
-
-	error = himax_bus_read(ts, address, dst, sizeof(dst));
-	if (error)
-		return error;
-
-	return 0;
-}
-
 static void himax_reset(struct himax_ts_data *ts)
 {
 	gpiod_set_value_cansleep(ts->gpiod_rst, 1);
@@ -160,7 +149,8 @@ static int himax_read_product_id(struct himax_ts_data *ts, u32 *product_id)
 {
 	int error;
 
-	error = himax_read_mcu(ts, HIMAX_REG_ADDR_ICID, product_id);
+	error = himax_bus_read(ts, HIMAX_REG_ADDR_ICID, product_id,
+			       sizeof(*product_id));
 	if (error)
 		return error;
 
@@ -416,8 +406,8 @@ static const struct himax_chip hx83112b_chip = {
 };
 
 static const struct i2c_device_id himax_ts_id[] = {
-	{ "hx83100a", (kernel_ulong_t)&hx83100a_chip },
-	{ "hx83112b", (kernel_ulong_t)&hx83112b_chip },
+	{ .name = "hx83100a", .driver_data = (kernel_ulong_t)&hx83100a_chip },
+	{ .name = "hx83112b", .driver_data = (kernel_ulong_t)&hx83112b_chip },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, himax_ts_id);

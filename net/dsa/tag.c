@@ -79,15 +79,16 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
 		if (likely(skb->dev)) {
 			dsa_default_offload_fwd_mark(skb);
 			nskb = skb;
+		} else {
+			/* Just drop the skb if we can't find the user */
+			kfree_skb(skb);
 		}
 	} else {
 		nskb = cpu_dp->rcv(skb, dev);
 	}
 
-	if (!nskb) {
-		kfree_skb(skb);
+	if (!nskb)
 		return 0;
-	}
 
 	skb = nskb;
 	skb_push(skb, ETH_HLEN);
@@ -105,12 +106,12 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	p = netdev_priv(skb->dev);
 
-	if (unlikely(cpu_dp->ds->untag_bridge_pvid)) {
-		nskb = dsa_untag_bridge_pvid(skb);
-		if (!nskb) {
-			kfree_skb(skb);
+	if (unlikely(cpu_dp->ds->untag_bridge_pvid ||
+		     cpu_dp->ds->untag_vlan_aware_bridge_pvid)) {
+		/* dsa_software_vlan_untag() drops skb on failure */
+		nskb = dsa_software_vlan_untag(skb);
+		if (!nskb)
 			return 0;
-		}
 		skb = nskb;
 	}
 

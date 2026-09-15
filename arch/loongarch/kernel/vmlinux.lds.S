@@ -6,7 +6,12 @@
 
 #define PAGE_SIZE _PAGE_SIZE
 #define RO_EXCEPTION_TABLE_ALIGN	4
-#define PHYSADDR_MASK			0xffffffffffff /* 48-bit */
+
+#ifdef CONFIG_32BIT
+#define PHYSADDR_MASK			0x1fffffff	/* 29-bit */
+#else
+#define PHYSADDR_MASK			0xffffffffffff	/* 48-bit */
+#endif
 
 /*
  * Put .bss..swapper_pg_dir as the first thing in .bss. This will
@@ -18,7 +23,7 @@
 #include "image-vars.h"
 
 /*
- * Max avaliable Page Size is 64K, so we set SectionAlignment
+ * Max available Page Size is 64K, so we set SectionAlignment
  * field of EFI application to 64K.
  */
 PECOFF_FILE_ALIGN = 0x200;
@@ -113,6 +118,14 @@ SECTIONS
 		__rela_dyn_end = .;
 	}
 
+#ifdef CONFIG_RELR
+	.relr.dyn : ALIGN(8) {
+		__relr_dyn_begin = .;
+		 *(.relr.dyn)
+		__relr_dyn_end = .;
+	}
+#endif
+
 	.data.rel : { *(.data.rel*) }
 
 #ifdef CONFIG_RELOCATABLE
@@ -139,6 +152,7 @@ SECTIONS
 
 	STABS_DEBUG
 	DWARF_DEBUG
+	MODINFO
 	ELF_DETAILS
 
 #ifdef CONFIG_EFI_STUB

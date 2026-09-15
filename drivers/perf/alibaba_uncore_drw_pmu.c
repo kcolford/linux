@@ -221,7 +221,7 @@ static ssize_t ali_drw_pmu_cpumask_show(struct device *dev,
 {
 	struct ali_drw_pmu *drw_pmu = to_ali_drw_pmu(dev_get_drvdata(dev));
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(drw_pmu->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(drw_pmu->cpu)));
 }
 
 static struct device_attribute ali_drw_pmu_cpumask_attr =
@@ -400,7 +400,7 @@ static irqreturn_t ali_drw_pmu_isr(int irq_num, void *data)
 			}
 
 			/* clear common counter intr status */
-			clr_status = FIELD_PREP(ALI_DRW_PMCOM_CNT_OV_INTR_MASK, 1);
+			clr_status = FIELD_PREP(ALI_DRW_PMCOM_CNT_OV_INTR_MASK, status);
 			writel(clr_status,
 			       drw_pmu->cfg_base + ALI_DRW_PMU_OV_INTR_CLR);
 		}
@@ -431,7 +431,7 @@ static struct ali_drw_pmu_irq *__ali_drw_pmu_init_irq(struct platform_device
 			return irq;
 	}
 
-	irq = kzalloc(sizeof(*irq), GFP_KERNEL);
+	irq = kzalloc_obj(*irq);
 	if (!irq)
 		return ERR_PTR(-ENOMEM);
 
@@ -449,11 +449,8 @@ static struct ali_drw_pmu_irq *__ali_drw_pmu_init_irq(struct platform_device
 	 */
 	ret = devm_request_irq(&pdev->dev, irq_num, ali_drw_pmu_isr,
 			       IRQF_SHARED, dev_name(&pdev->dev), irq);
-	if (ret < 0) {
-		dev_err(&pdev->dev,
-			"Fail to request IRQ:%d ret:%d\n", irq_num, ret);
+	if (ret < 0)
 		goto out_free;
-	}
 
 	ret = irq_set_affinity_hint(irq_num, cpumask_of(irq->cpu));
 	if (ret)
@@ -782,7 +779,7 @@ static struct platform_driver ali_drw_pmu_driver = {
 		   .acpi_match_table = ali_drw_acpi_match,
 		   },
 	.probe = ali_drw_pmu_probe,
-	.remove_new = ali_drw_pmu_remove,
+	.remove = ali_drw_pmu_remove,
 };
 
 static int __init ali_drw_pmu_init(void)

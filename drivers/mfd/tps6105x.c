@@ -16,14 +16,14 @@
 #include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/tps6105x.h>
 
-static struct regmap_config tps6105x_regmap_config = {
+static const struct regmap_config tps6105x_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = TPS6105X_REG_3,

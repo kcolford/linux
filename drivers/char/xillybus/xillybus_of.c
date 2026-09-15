@@ -55,11 +55,8 @@ static int xilly_drv_probe(struct platform_device *op)
 
 	rc = devm_request_irq(dev, irq, xillybus_isr, 0, xillyname, endpoint);
 
-	if (rc) {
-		dev_err(endpoint->dev,
-			"Failed to register IRQ handler. Aborting.\n");
+	if (rc)
 		return -ENODEV;
-	}
 
 	return xillybus_endpoint_discovery(endpoint);
 }
@@ -74,7 +71,7 @@ static void xilly_drv_remove(struct platform_device *op)
 
 static struct platform_driver xillybus_platform_driver = {
 	.probe = xilly_drv_probe,
-	.remove_new = xilly_drv_remove,
+	.remove = xilly_drv_remove,
 	.driver = {
 		.name = xillyname,
 		.of_match_table = xillybus_of_match,

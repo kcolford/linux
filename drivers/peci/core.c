@@ -52,7 +52,7 @@ static struct peci_controller *peci_controller_alloc(struct device *dev,
 	if (!ops->xfer)
 		return ERR_PTR(-EINVAL);
 
-	controller = kzalloc(sizeof(*controller), GFP_KERNEL);
+	controller = kzalloc_obj(*controller);
 	if (!controller)
 		return ERR_PTR(-ENOMEM);
 
@@ -158,7 +158,7 @@ err_put:
 
 	return ERR_PTR(ret);
 }
-EXPORT_SYMBOL_NS_GPL(devm_peci_controller_add, PECI);
+EXPORT_SYMBOL_NS_GPL(devm_peci_controller_add, "PECI");
 
 static const struct peci_device_id *
 peci_bus_match_device_id(const struct peci_device_id *id, struct peci_device *device)
@@ -172,10 +172,10 @@ peci_bus_match_device_id(const struct peci_device_id *id, struct peci_device *de
 	return NULL;
 }
 
-static int peci_bus_device_match(struct device *dev, struct device_driver *drv)
+static int peci_bus_device_match(struct device *dev, const struct device_driver *drv)
 {
 	struct peci_device *device = to_peci_device(dev);
-	struct peci_driver *peci_drv = to_peci_driver(drv);
+	const struct peci_driver *peci_drv = to_peci_driver(drv);
 
 	if (dev->type != &peci_device_type)
 		return 0;

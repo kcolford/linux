@@ -20,7 +20,6 @@
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -335,7 +334,7 @@ static struct platform_driver exynos_trng_driver = {
 		.of_match_table = exynos_trng_dt_match,
 	},
 	.probe = exynos_trng_probe,
-	.remove_new = exynos_trng_remove,
+	.remove = exynos_trng_remove,
 };
 
 module_platform_driver(exynos_trng_driver);

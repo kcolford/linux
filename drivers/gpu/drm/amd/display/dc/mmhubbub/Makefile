@@ -1,5 +1,5 @@
 #
-# Copyright 2020 Advanced Micro Devices, Inc.
+# Copyright 2020-2026 Advanced Micro Devices, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -25,6 +25,15 @@
 
 ifdef CONFIG_DRM_AMD_DC_FP
 ###############################################################################
+# DCN20
+###############################################################################
+MMHUBBUB_DCN20 = dcn20_mmhubbub.o
+
+AMD_DAL_MMHUBBUB_DCN20 = $(addprefix $(AMDDALPATH)/dc/mmhubbub/dcn20/,$(MMHUBBUB_DCN20))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_MMHUBBUB_DCN20)
+
+###############################################################################
 # DCN32
 ###############################################################################
 MMHUBBUB_DCN32 = dcn32_mmhubbub.o
@@ -42,4 +51,22 @@ AMD_DAL_MMHUBBUB_DCN35 = $(addprefix $(AMDDALPATH)/dc/mmhubbub/dcn35/,$(MMHUBBUB
 
 AMD_DISPLAY_FILES += $(AMD_DAL_MMHUBBUB_DCN35)
 
+
+###############################################################################
+# DCN401
+###############################################################################
+MMHUBBUB_DCN401 = dcn401_mmhubbub.o
+
+AMD_DAL_MMHUBBUB_DCN401 = $(addprefix $(AMDDALPATH)/dc/mmhubbub/dcn401/,$(MMHUBBUB_DCN401))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_MMHUBBUB_DCN401)
 endif
+
+###############################################################################
+# DCN42
+###############################################################################
+MMHUBBUB_DCN42 = dcn42_mmhubbub.o
+
+AMD_DAL_MMHUBBUB_DCN42 = $(addprefix $(AMDDALPATH)/dc/mmhubbub/dcn42/,$(MMHUBBUB_DCN42))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_MMHUBBUB_DCN42)

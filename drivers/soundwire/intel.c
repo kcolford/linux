@@ -6,6 +6,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -73,12 +74,11 @@ static int intel_reg_show(struct seq_file *s_file, void *data)
 	struct sdw_intel *sdw = s_file->private;
 	void __iomem *s = sdw->link_res->shim;
 	void __iomem *a = sdw->link_res->alh;
-	char *buf;
 	ssize_t ret;
 	int i, j;
 	unsigned int links, reg;
 
-	buf = kzalloc(RD_BUF, GFP_KERNEL);
+	char *buf __free(kfree) = kzalloc(RD_BUF, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -129,7 +129,6 @@ static int intel_reg_show(struct seq_file *s_file, void *data)
 		ret += intel_sprintf(a, true, buf, ret, SDW_ALH_STRMZCFG(i));
 
 	seq_printf(s_file, "%s", buf);
-	kfree(buf);
 
 	return 0;
 }
@@ -727,7 +726,6 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	struct sdw_cdns_dai_runtime *dai_runtime;
 	struct sdw_cdns_pdi *pdi;
 	struct sdw_stream_config sconfig;
-	struct sdw_port_config *pconfig;
 	int ch, dir;
 	int ret;
 
@@ -743,10 +741,8 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 
 	pdi = sdw_cdns_alloc_pdi(cdns, &cdns->pcm, ch, dir, dai->id);
 
-	if (!pdi) {
-		ret = -EINVAL;
-		goto error;
-	}
+	if (!pdi)
+		return -EINVAL;
 
 	/* do run-time configurations for SHIM, ALH and PDI/PORT */
 	intel_pdi_shim_configure(sdw, pdi);
@@ -763,7 +759,7 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 				  sdw->instance,
 				  pdi->intel_alh_id);
 	if (ret)
-		goto error;
+		return ret;
 
 	sconfig.direction = dir;
 	sconfig.ch_count = ch;
@@ -773,11 +769,9 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	sconfig.bps = snd_pcm_format_width(params_format(params));
 
 	/* Port configuration */
-	pconfig = kzalloc(sizeof(*pconfig), GFP_KERNEL);
-	if (!pconfig) {
-		ret =  -ENOMEM;
-		goto error;
-	}
+	struct sdw_port_config *pconfig __free(kfree) = kzalloc_obj(*pconfig);
+	if (!pconfig)
+		return -ENOMEM;
 
 	pconfig->num = pdi->num;
 	pconfig->ch_mask = (1 << ch) - 1;
@@ -787,8 +781,6 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	if (ret)
 		dev_err(cdns->dev, "add master to stream failed:%d\n", ret);
 
-	kfree(pconfig);
-error:
 	return ret;
 }
 
@@ -914,19 +906,6 @@ static int intel_trigger(struct snd_pcm_substream *substream, int cmd, struct sn
 	}
 
 	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-
-		/*
-		 * The .prepare callback is used to deal with xruns and resume operations.
-		 * In the case of xruns, the DMAs and SHIM registers cannot be touched,
-		 * but for resume operations the DMAs and SHIM registers need to be initialized.
-		 * the .trigger callback is used to track the suspend case only.
-		 */
-
-		dai_runtime->suspended = true;
-
-		break;
-
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		dai_runtime->paused = true;
 		break;
@@ -963,10 +942,12 @@ static int intel_component_dais_suspend(struct snd_soc_component *component)
 	struct snd_soc_dai *dai;
 
 	/*
-	 * In the corner case where a SUSPEND happens during a PAUSE, the ALSA core
-	 * does not throw the TRIGGER_SUSPEND. This leaves the DAIs in an unbalanced state.
-	 * Since the component suspend is called last, we can trap this corner case
-	 * and force the DAIs to release their resources.
+	 * Mark all open streams as suspended.
+	 * Open streams at this point can be in SUSPENDED, PAUSED or STOPPED
+	 * state and during prepare the DMAs and SHIM registers need to be
+	 * initialized for them.
+	 * The STOPPED state is a special corner case which can happen if audio
+	 * experiences xrun at suspend time.
 	 */
 	for_each_component_dais(component, dai) {
 		struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
@@ -974,13 +955,7 @@ static int intel_component_dais_suspend(struct snd_soc_component *component)
 
 		dai_runtime = cdns->dai_runtime_array[dai->id];
 
-		if (!dai_runtime)
-			continue;
-
-		if (dai_runtime->suspended)
-			continue;
-
-		if (dai_runtime->paused)
+		if (dai_runtime)
 			dai_runtime->suspended = true;
 	}
 
@@ -1118,4 +1093,4 @@ const struct sdw_intel_hw_ops sdw_intel_cnl_hw_ops = {
 	.sync_go = intel_shim_sync_go,
 	.sync_check_cmdsync_unlocked = intel_check_cmdsync_unlocked,
 };
-EXPORT_SYMBOL_NS(sdw_intel_cnl_hw_ops, SOUNDWIRE_INTEL);
+EXPORT_SYMBOL_NS(sdw_intel_cnl_hw_ops, "SOUNDWIRE_INTEL");

@@ -458,7 +458,7 @@ static void sec_ipv6_hashmask(struct sec_dev_info *info, u32 hash_mask[])
 static int sec_ipv4_hashmask(struct sec_dev_info *info, u32 hash_mask)
 {
 	if (hash_mask & SEC_HASH_IPV4_MASK) {
-		dev_err(info->dev, "Sec Ipv4 Hash Mask Input Error!\n ");
+		dev_err(info->dev, "Sec Ipv4 Hash Mask Input Error!\n");
 		return -EINVAL;
 	}
 
@@ -922,7 +922,8 @@ static int sec_hw_init(struct sec_dev_info *info)
 	struct iommu_domain *domain;
 	u32 sec_ipv4_mask = 0;
 	u32 sec_ipv6_mask[10] = {};
-	u32 i, ret;
+	int ret;
+	u32 i;
 
 	domain = iommu_get_domain_for_dev(info->dev);
 
@@ -1009,25 +1010,12 @@ static void sec_queue_base_init(struct sec_dev_info *info,
 
 static int sec_map_io(struct sec_dev_info *info, struct platform_device *pdev)
 {
-	struct resource *res;
 	int i;
 
 	for (i = 0; i < SEC_NUM_ADDR_REGIONS; i++) {
-		res = platform_get_resource(pdev, IORESOURCE_MEM, i);
-
-		if (!res) {
-			dev_err(info->dev, "Memory resource %d not found\n", i);
-			return -EINVAL;
-		}
-
-		info->regs[i] = devm_ioremap(info->dev, res->start,
-					     resource_size(res));
-		if (!info->regs[i]) {
-			dev_err(info->dev,
-				"Memory resource %d could not be remapped\n",
-				i);
-			return -EINVAL;
-		}
+		info->regs[i] = devm_platform_ioremap_resource(pdev, i);
+		if (IS_ERR(info->regs[i]))
+			return PTR_ERR(info->regs[i]);
 	}
 
 	return 0;
@@ -1304,7 +1292,7 @@ MODULE_DEVICE_TABLE(acpi, sec_acpi_match);
 
 static struct platform_driver sec_driver = {
 	.probe = sec_probe,
-	.remove_new = sec_remove,
+	.remove = sec_remove,
 	.driver = {
 		.name = "hisi_sec_platform_driver",
 		.of_match_table = sec_match,

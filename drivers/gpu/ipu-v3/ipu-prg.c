@@ -419,15 +419,13 @@ static int ipu_prg_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int ipu_prg_remove(struct platform_device *pdev)
+static void ipu_prg_remove(struct platform_device *pdev)
 {
 	struct ipu_prg *prg = platform_get_drvdata(pdev);
 
 	mutex_lock(&ipu_prg_list_mutex);
 	list_del(&prg->list);
 	mutex_unlock(&ipu_prg_list_mutex);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM

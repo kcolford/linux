@@ -28,6 +28,7 @@
 #include "kfd_topology.h"
 #include "amdgpu.h"
 #include "amdgpu_amdkfd.h"
+#include "amdgpu_xgmi.h"
 
 /* GPU Processor ID base for dGPUs for which VCRAT needs to be created.
  * GPU processor ID are expressed with Bit[31]=1.
@@ -1403,6 +1404,23 @@ int kfd_parse_crat_table(void *crat_image, struct list_head *device_list,
 	sub_type_hdr = (struct crat_subtype_generic *)(crat_table+1);
 	while ((char *)sub_type_hdr + sizeof(struct crat_subtype_generic) <
 			((char *)crat_image) + image_len) {
+		if (!sub_type_hdr->length ||
+		    sub_type_hdr->length < sizeof(struct crat_subtype_generic)) {
+			pr_warn("Invalid CRAT subtype length %u\n",
+				sub_type_hdr->length);
+			ret = -EINVAL;
+			break;
+		}
+
+		/* Validate subtype fits within remaining image */
+		if ((char *)sub_type_hdr + sub_type_hdr->length >
+		    (char *)crat_image + image_len) {
+			pr_warn("CRAT subtype length %u exceeds image bounds\n",
+				sub_type_hdr->length);
+			ret = -EINVAL;
+			break;
+		}
+
 		if (sub_type_hdr->flags & CRAT_SUBTYPE_FLAGS_ENABLED) {
 			ret = kfd_parse_subtype(sub_type_hdr, device_list);
 			if (ret)
@@ -1422,6 +1440,7 @@ err:
 
 
 static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
+						   bool cache_line_size_missing,
 						   struct kfd_gpu_cache_info *pcache_info)
 {
 	struct amdgpu_device *adev = kdev->adev;
@@ -1434,7 +1453,10 @@ static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
 		pcache_info[i].flags = (CRAT_CACHE_FLAGS_ENABLED |
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
-		pcache_info[0].num_cu_shared = adev->gfx.config.gc_num_tcp_per_wpg / 2;
+		pcache_info[i].num_cu_shared = adev->gfx.config.gc_num_tcp_per_wpg / 2;
+		pcache_info[i].cache_line_size = adev->gfx.config.gc_tcp_cache_line_size;
+		if (cache_line_size_missing && !pcache_info[i].cache_line_size)
+			pcache_info[i].cache_line_size = 128;
 		i++;
 	}
 	/* Scalar L1 Instruction Cache per SQC */
@@ -1446,6 +1468,9 @@ static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
 					CRAT_CACHE_FLAGS_INST_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
 		pcache_info[i].num_cu_shared = adev->gfx.config.gc_num_sqc_per_wgp * 2;
+		pcache_info[i].cache_line_size = adev->gfx.config.gc_instruction_cache_line_size;
+		if (cache_line_size_missing && !pcache_info[i].cache_line_size)
+			pcache_info[i].cache_line_size = 128;
 		i++;
 	}
 	/* Scalar L1 Data Cache per SQC */
@@ -1456,6 +1481,9 @@ static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
 		pcache_info[i].num_cu_shared = adev->gfx.config.gc_num_sqc_per_wgp * 2;
+		pcache_info[i].cache_line_size = adev->gfx.config.gc_scalar_data_cache_line_size;
+		if (cache_line_size_missing && !pcache_info[i].cache_line_size)
+			pcache_info[i].cache_line_size = 64;
 		i++;
 	}
 	/* GL1 Data Cache per SA */
@@ -1468,6 +1496,8 @@ static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
 		pcache_info[i].num_cu_shared = adev->gfx.config.max_cu_per_sh;
+		if (cache_line_size_missing)
+			pcache_info[i].cache_line_size = 128;
 		i++;
 	}
 	/* L2 Data Cache per GPU (Total Tex Cache) */
@@ -1478,6 +1508,9 @@ static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
 		pcache_info[i].num_cu_shared = adev->gfx.config.max_cu_per_sh;
+		pcache_info[i].cache_line_size = adev->gfx.config.gc_tcc_cache_line_size;
+		if (cache_line_size_missing && !pcache_info[i].cache_line_size)
+			pcache_info[i].cache_line_size = 128;
 		i++;
 	}
 	/* L3 Data Cache per GPU */
@@ -1488,6 +1521,7 @@ static int kfd_fill_gpu_cache_info_from_gfx_config(struct kfd_dev *kdev,
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
 		pcache_info[i].num_cu_shared = adev->gfx.config.max_cu_per_sh;
+		pcache_info[i].cache_line_size = 64;
 		i++;
 	}
 	return i;
@@ -1503,6 +1537,8 @@ static int kfd_fill_gpu_cache_info_from_gfx_config_v2(struct kfd_dev *kdev,
 	if (adev->gfx.config.gc_tcp_size_per_cu) {
 		pcache_info[i].cache_size = adev->gfx.config.gc_tcp_size_per_cu;
 		pcache_info[i].cache_level = 1;
+		/* Cacheline size not available in IP discovery for gc943,gc944 */
+		pcache_info[i].cache_line_size = 128;
 		pcache_info[i].flags = (CRAT_CACHE_FLAGS_ENABLED |
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
@@ -1514,6 +1550,7 @@ static int kfd_fill_gpu_cache_info_from_gfx_config_v2(struct kfd_dev *kdev,
 		pcache_info[i].cache_size =
 			adev->gfx.config.gc_l1_instruction_cache_size_per_sqc;
 		pcache_info[i].cache_level = 1;
+		pcache_info[i].cache_line_size = 64;
 		pcache_info[i].flags = (CRAT_CACHE_FLAGS_ENABLED |
 					CRAT_CACHE_FLAGS_INST_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
@@ -1524,6 +1561,7 @@ static int kfd_fill_gpu_cache_info_from_gfx_config_v2(struct kfd_dev *kdev,
 	if (adev->gfx.config.gc_l1_data_cache_size_per_sqc) {
 		pcache_info[i].cache_size = adev->gfx.config.gc_l1_data_cache_size_per_sqc;
 		pcache_info[i].cache_level = 1;
+		pcache_info[i].cache_line_size = 64;
 		pcache_info[i].flags = (CRAT_CACHE_FLAGS_ENABLED |
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
@@ -1534,6 +1572,7 @@ static int kfd_fill_gpu_cache_info_from_gfx_config_v2(struct kfd_dev *kdev,
 	if (adev->gfx.config.gc_tcc_size) {
 		pcache_info[i].cache_size = adev->gfx.config.gc_tcc_size;
 		pcache_info[i].cache_level = 2;
+		pcache_info[i].cache_line_size = 128;
 		pcache_info[i].flags = (CRAT_CACHE_FLAGS_ENABLED |
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
@@ -1544,6 +1583,7 @@ static int kfd_fill_gpu_cache_info_from_gfx_config_v2(struct kfd_dev *kdev,
 	if (adev->gmc.mall_size) {
 		pcache_info[i].cache_size = adev->gmc.mall_size / 1024;
 		pcache_info[i].cache_level = 3;
+		pcache_info[i].cache_line_size = 64;
 		pcache_info[i].flags = (CRAT_CACHE_FLAGS_ENABLED |
 					CRAT_CACHE_FLAGS_DATA_CACHE |
 					CRAT_CACHE_FLAGS_SIMD_CACHE);
@@ -1556,6 +1596,7 @@ static int kfd_fill_gpu_cache_info_from_gfx_config_v2(struct kfd_dev *kdev,
 int kfd_get_gpu_cache_info(struct kfd_node *kdev, struct kfd_gpu_cache_info **pcache_info)
 {
 	int num_of_cache_types = 0;
+	bool cache_line_size_missing = false;
 
 	switch (kdev->adev->asic_type) {
 	case CHIP_KAVERI:
@@ -1615,6 +1656,7 @@ int kfd_get_gpu_cache_info(struct kfd_node *kdev, struct kfd_gpu_cache_info **pc
 			break;
 		case IP_VERSION(9, 4, 3):
 		case IP_VERSION(9, 4, 4):
+		case IP_VERSION(9, 5, 0):
 			num_of_cache_types =
 				kfd_fill_gpu_cache_info_from_gfx_config_v2(kdev->kfd,
 									*pcache_info);
@@ -1679,10 +1721,23 @@ int kfd_get_gpu_cache_info(struct kfd_node *kdev, struct kfd_gpu_cache_info **pc
 		case IP_VERSION(11, 5, 0):
 		case IP_VERSION(11, 5, 1):
 		case IP_VERSION(11, 5, 2):
+		case IP_VERSION(11, 5, 3):
+		case IP_VERSION(11, 5, 4):
+		case IP_VERSION(11, 5, 6):
+		case IP_VERSION(11, 7, 0):
+		case IP_VERSION(11, 7, 1):
+			/* Cacheline size not available in IP discovery for gc11.
+			 * kfd_fill_gpu_cache_info_from_gfx_config to hard code it
+			 */
+			cache_line_size_missing = true;
+			fallthrough;
 		case IP_VERSION(12, 0, 0):
 		case IP_VERSION(12, 0, 1):
+		case IP_VERSION(12, 1, 0):
 			num_of_cache_types =
-				kfd_fill_gpu_cache_info_from_gfx_config(kdev->kfd, *pcache_info);
+				kfd_fill_gpu_cache_info_from_gfx_config(kdev->kfd,
+									cache_line_size_missing,
+									*pcache_info);
 			break;
 		default:
 			*pcache_info = dummy_cache_info;
@@ -1786,7 +1841,7 @@ static int kfd_fill_mem_info_for_cpu(int numa_node_id, int *avail_size,
 	return 0;
 }
 
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 static int kfd_fill_iolink_info_for_cpu(int numa_node_id, int *avail_size,
 				uint32_t *num_entries,
 				struct crat_subtype_iolink *sub_type_hdr)
@@ -1845,7 +1900,7 @@ static int kfd_create_vcrat_image_cpu(void *pcrat_image, size_t *size)
 	struct crat_subtype_generic *sub_type_hdr;
 	int avail_size = *size;
 	int numa_node_id;
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 	uint32_t entries = 0;
 #endif
 	int ret = 0;
@@ -1910,7 +1965,7 @@ static int kfd_create_vcrat_image_cpu(void *pcrat_image, size_t *size)
 			sub_type_hdr->length);
 
 		/* Fill in Subtype: IO Link */
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 		ret = kfd_fill_iolink_info_for_cpu(numa_node_id, &avail_size,
 				&entries,
 				(struct crat_subtype_iolink *)sub_type_hdr);
@@ -2100,9 +2155,6 @@ static int kfd_fill_gpu_direct_io_link_to_cpu(int *avail_size,
 		bool ext_cpu = KFD_GC_VERSION(kdev) != IP_VERSION(9, 4, 3);
 		int mem_bw = 819200, weight = ext_cpu ? KFD_CRAT_XGMI_WEIGHT :
 							KFD_CRAT_INTRA_SOCKET_WEIGHT;
-		uint32_t bandwidth = ext_cpu ? amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(
-							kdev->adev, NULL, true) : mem_bw;
-
 		/*
 		 * with host gpu xgmi link, host can access gpu memory whether
 		 * or not pcie bar type is large, so always create bidirectional
@@ -2111,8 +2163,16 @@ static int kfd_fill_gpu_direct_io_link_to_cpu(int *avail_size,
 		sub_type_hdr->flags |= CRAT_IOLINK_FLAGS_BI_DIRECTIONAL;
 		sub_type_hdr->io_interface_type = CRAT_IOLINK_TYPE_XGMI;
 		sub_type_hdr->weight_xgmi = weight;
-		sub_type_hdr->minimum_bandwidth_mbs = bandwidth;
-		sub_type_hdr->maximum_bandwidth_mbs = bandwidth;
+		if (ext_cpu) {
+			amdgpu_xgmi_get_bandwidth(kdev->adev, NULL,
+						  AMDGPU_XGMI_BW_MODE_PER_LINK,
+						  AMDGPU_XGMI_BW_UNIT_MBYTES,
+						  &sub_type_hdr->minimum_bandwidth_mbs,
+						  &sub_type_hdr->maximum_bandwidth_mbs);
+		} else {
+			sub_type_hdr->minimum_bandwidth_mbs = mem_bw;
+			sub_type_hdr->maximum_bandwidth_mbs = mem_bw;
+		}
 	} else {
 		sub_type_hdr->io_interface_type = CRAT_IOLINK_TYPE_PCIEXPRESS;
 		sub_type_hdr->minimum_bandwidth_mbs =
@@ -2165,12 +2225,12 @@ static int kfd_fill_gpu_xgmi_link_to_gpu(int *avail_size,
 
 	if (use_ta_info) {
 		sub_type_hdr->weight_xgmi = KFD_CRAT_XGMI_WEIGHT *
-			amdgpu_amdkfd_get_xgmi_hops_count(kdev->adev, peer_kdev->adev);
-		sub_type_hdr->maximum_bandwidth_mbs =
-			amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(kdev->adev,
-							peer_kdev->adev, false);
-		sub_type_hdr->minimum_bandwidth_mbs = sub_type_hdr->maximum_bandwidth_mbs ?
-			amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(kdev->adev, NULL, true) : 0;
+			amdgpu_xgmi_get_hops_count(kdev->adev, peer_kdev->adev);
+		amdgpu_xgmi_get_bandwidth(kdev->adev, peer_kdev->adev,
+					  AMDGPU_XGMI_BW_MODE_PER_PEER,
+					  AMDGPU_XGMI_BW_UNIT_MBYTES,
+					  &sub_type_hdr->minimum_bandwidth_mbs,
+					  &sub_type_hdr->maximum_bandwidth_mbs);
 	} else {
 		bool is_single_hop = kdev->kfd == peer_kdev->kfd;
 		int weight = is_single_hop ? KFD_CRAT_INTRA_SOCKET_WEIGHT :
@@ -2319,9 +2379,11 @@ static int kfd_create_vcrat_image_gpu(void *pcrat_image,
 	if (kdev->kfd->hive_id) {
 		for (nid = 0; nid < proximity_domain; ++nid) {
 			peer_dev = kfd_topology_device_by_proximity_domain_no_lock(nid);
-			if (!peer_dev->gpu)
+			if (!peer_dev || !peer_dev->gpu)
 				continue;
 			if (peer_dev->gpu->kfd->hive_id != kdev->kfd->hive_id)
+				continue;
+			if (!amdgpu_xgmi_get_is_sharing_enabled(kdev->adev, peer_dev->gpu->adev))
 				continue;
 			sub_type_hdr = (typeof(sub_type_hdr))(
 				(char *)sub_type_hdr +

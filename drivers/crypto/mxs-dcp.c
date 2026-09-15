@@ -225,21 +225,22 @@ static int mxs_dcp_start_dma(struct dcp_async_ctx *actx)
 static int mxs_dcp_run_aes(struct dcp_async_ctx *actx,
 			   struct skcipher_request *req, int init)
 {
-	dma_addr_t key_phys = 0;
-	dma_addr_t src_phys, dst_phys;
+	dma_addr_t key_phys, src_phys, dst_phys;
 	struct dcp *sdcp = global_sdcp;
 	struct dcp_dma_desc *desc = &sdcp->coh->desc[actx->chan];
 	struct dcp_aes_req_ctx *rctx = skcipher_request_ctx(req);
 	bool key_referenced = actx->key_referenced;
 	int ret;
 
-	if (!key_referenced) {
+	if (key_referenced)
+		key_phys = dma_map_single(sdcp->dev, sdcp->coh->aes_key + AES_KEYSIZE_128,
+					  AES_KEYSIZE_128, DMA_TO_DEVICE);
+	else
 		key_phys = dma_map_single(sdcp->dev, sdcp->coh->aes_key,
 					  2 * AES_KEYSIZE_128, DMA_TO_DEVICE);
-		ret = dma_mapping_error(sdcp->dev, key_phys);
-		if (ret)
-			return ret;
-	}
+	ret = dma_mapping_error(sdcp->dev, key_phys);
+	if (ret)
+		return ret;
 
 	src_phys = dma_map_single(sdcp->dev, sdcp->coh->aes_in_buf,
 				  DCP_BUF_SZ, DMA_TO_DEVICE);
@@ -264,12 +265,12 @@ static int mxs_dcp_run_aes(struct dcp_async_ctx *actx,
 		    MXS_DCP_CONTROL0_INTERRUPT |
 		    MXS_DCP_CONTROL0_ENABLE_CIPHER;
 
-	if (key_referenced)
-		/* Set OTP key bit to select the key via KEY_SELECT. */
-		desc->control0 |= MXS_DCP_CONTROL0_OTP_KEY;
-	else
+	if (!key_referenced)
 		/* Payload contains the key. */
 		desc->control0 |= MXS_DCP_CONTROL0_PAYLOAD_KEY;
+	else if (actx->key[0] == DCP_PAES_KEY_OTP)
+		/* Set OTP key bit to select the key via KEY_SELECT. */
+		desc->control0 |= MXS_DCP_CONTROL0_OTP_KEY;
 
 	if (rctx->enc)
 		desc->control0 |= MXS_DCP_CONTROL0_CIPHER_ENCRYPT;
@@ -300,7 +301,10 @@ aes_done_run:
 err_dst:
 	dma_unmap_single(sdcp->dev, src_phys, DCP_BUF_SZ, DMA_TO_DEVICE);
 err_src:
-	if (!key_referenced)
+	if (key_referenced)
+		dma_unmap_single(sdcp->dev, key_phys, AES_KEYSIZE_128,
+				 DMA_TO_DEVICE);
+	else
 		dma_unmap_single(sdcp->dev, key_phys, 2 * AES_KEYSIZE_128,
 				 DMA_TO_DEVICE);
 	return ret;
@@ -349,7 +353,7 @@ static int mxs_dcp_aes_block_crypt(struct crypto_async_request *arq)
 
 	for_each_sg(req->src, src, sg_nents(req->src), i) {
 		src_buf = sg_virt(src);
-		len = sg_dma_len(src);
+		len = src->length;
 		tlen += len;
 		limit_hit = tlen > req->cryptlen;
 
@@ -1081,17 +1085,13 @@ static int mxs_dcp_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, dcp_vmi_irq, mxs_dcp_irq, 0,
 			       "dcp-vmi-irq", sdcp);
-	if (ret) {
-		dev_err(dev, "Failed to claim DCP VMI IRQ!\n");
+	if (ret)
 		return ret;
-	}
 
 	ret = devm_request_irq(dev, dcp_irq, mxs_dcp_irq, 0,
 			       "dcp-irq", sdcp);
-	if (ret) {
-		dev_err(dev, "Failed to claim DCP IRQ!\n");
+	if (ret)
 		return ret;
-	}
 
 	/* Allocate coherent helper block. */
 	sdcp->coh = devm_kzalloc(dev, sizeof(*sdcp->coh) + DCP_ALIGNMENT,
@@ -1243,7 +1243,7 @@ MODULE_DEVICE_TABLE(of, mxs_dcp_dt_ids);
 
 static struct platform_driver mxs_dcp_driver = {
 	.probe	= mxs_dcp_probe,
-	.remove_new = mxs_dcp_remove,
+	.remove = mxs_dcp_remove,
 	.driver	= {
 		.name		= "mxs-dcp",
 		.of_match_table	= mxs_dcp_dt_ids,

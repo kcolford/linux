@@ -5,6 +5,8 @@
 
 #include "xe_guc_ads.h"
 
+#include <linux/fault-inject.h>
+
 #include <drm/drm_managed.h>
 
 #include <generated/xe_wa_oob.h>
@@ -14,16 +16,19 @@
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_guc_regs.h"
 #include "xe_bo.h"
+#include "xe_configfs.h"
 #include "xe_gt.h"
 #include "xe_gt_ccs_mode.h"
+#include "xe_gt_mcr.h"
 #include "xe_gt_printk.h"
 #include "xe_guc.h"
+#include "xe_guc_buf.h"
+#include "xe_guc_capture.h"
 #include "xe_guc_ct.h"
 #include "xe_hw_engine.h"
 #include "xe_lrc.h"
 #include "xe_map.h"
 #include "xe_mmio.h"
-#include "xe_platform_types.h"
 #include "xe_wa.h"
 
 /* Slack of a few additional entries per engine */
@@ -59,10 +64,14 @@ ads_to_map(struct xe_guc_ads *ads)
 
 /*
  * The Additional Data Struct (ADS) has pointers for different buffers used by
- * the GuC. One single gem object contains the ADS struct itself (guc_ads) and
- * all the extra buffers indirectly linked via the ADS struct's entries.
+ * the GuC. One gem object (ads->bo) contains the ADS struct itself (guc_ads)
+ * and most of the extra buffers linked via the ADS struct's entries.  The UM
+ * fault queues (PAGE_FAULT, PAGE_FAULT_RESPONSE, ACCESS_COUNTER rings) are
+ * kept in a separate BO (ads->um_queue_bo) so that the full memset of ads->bo
+ * performed on every GT reset does not discard fault descriptors already
+ * written into the rings by the GPU.
  *
- * Layout of the ADS blob allocated for the GuC:
+ * Layout of the ADS blob (ads->bo):
  *
  *      +---------------------------------------+ <== base
  *      | guc_ads                               |
@@ -91,10 +100,6 @@ ads_to_map(struct xe_guc_ads *ads)
  *      | padding                               |
  *      +---------------------------------------+ <== 4K aligned
  *      | capture lists                         |
- *      +---------------------------------------+
- *      | padding                               |
- *      +---------------------------------------+ <== 4K aligned
- *      | UM queues                             |
  *      +---------------------------------------+
  *      | padding                               |
  *      +---------------------------------------+ <== 4K aligned
@@ -148,18 +153,7 @@ static u32 guc_ads_waklv_size(struct xe_guc_ads *ads)
 
 static size_t guc_ads_capture_size(struct xe_guc_ads *ads)
 {
-	/* FIXME: Allocate a proper capture list */
-	return PAGE_ALIGN(PAGE_SIZE);
-}
-
-static size_t guc_ads_um_queues_size(struct xe_guc_ads *ads)
-{
-	struct xe_device *xe = ads_to_xe(ads);
-
-	if (!xe->info.has_usm)
-		return 0;
-
-	return GUC_UM_QUEUE_SIZE * GUC_UM_HW_QUEUE_MAX;
+	return PAGE_ALIGN(ads->capture_size);
 }
 
 static size_t guc_ads_private_data_size(struct xe_guc_ads *ads)
@@ -202,22 +196,12 @@ static size_t guc_ads_capture_offset(struct xe_guc_ads *ads)
 	return PAGE_ALIGN(offset);
 }
 
-static size_t guc_ads_um_queues_offset(struct xe_guc_ads *ads)
-{
-	u32 offset;
-
-	offset = guc_ads_capture_offset(ads) +
-		 guc_ads_capture_size(ads);
-
-	return PAGE_ALIGN(offset);
-}
-
 static size_t guc_ads_private_data_offset(struct xe_guc_ads *ads)
 {
 	size_t offset;
 
-	offset = guc_ads_um_queues_offset(ads) +
-		guc_ads_um_queues_size(ads);
+	offset = guc_ads_capture_offset(ads) +
+		guc_ads_capture_size(ads);
 
 	return PAGE_ALIGN(offset);
 }
@@ -226,11 +210,6 @@ static size_t guc_ads_size(struct xe_guc_ads *ads)
 {
 	return guc_ads_private_data_offset(ads) +
 		guc_ads_private_data_size(ads);
-}
-
-static bool needs_wa_1607983814(struct xe_device *xe)
-{
-	return GRAPHICS_VERx100(xe) < 1250;
 }
 
 static size_t calculate_regset_size(struct xe_gt *gt)
@@ -247,21 +226,47 @@ static size_t calculate_regset_size(struct xe_gt *gt)
 
 	count += ADS_REGSET_EXTRA_MAX * XE_NUM_HW_ENGINES;
 
-	if (needs_wa_1607983814(gt_to_xe(gt)))
+	if (XE_GT_WA(gt, 1607983814))
 		count += LNCFCMOCS_REG_COUNT;
 
 	return count * sizeof(struct guc_mmio_reg);
 }
 
-static u32 engine_enable_mask(struct xe_gt *gt, enum xe_engine_class class)
+static inline enum xe_engine_class guc_class_to_engine_class(u16 guc_class)
+{
+	switch (guc_class) {
+	case GUC_RENDER_CLASS:
+		return XE_ENGINE_CLASS_RENDER;
+	case GUC_VIDEO_CLASS:
+		return XE_ENGINE_CLASS_VIDEO_DECODE;
+	case GUC_VIDEOENHANCE_CLASS:
+		return XE_ENGINE_CLASS_VIDEO_ENHANCE;
+	case GUC_BLITTER_CLASS:
+	case GUC_PAGING_CLASS:
+		return XE_ENGINE_CLASS_COPY;
+	case GUC_COMPUTE_CLASS:
+		return XE_ENGINE_CLASS_COMPUTE;
+	case GUC_GSC_OTHER_CLASS:
+		return XE_ENGINE_CLASS_OTHER;
+	default:
+		XE_WARN_ON(guc_class);
+		return -1;
+	}
+}
+
+static u32 engine_enable_mask(struct xe_gt *gt, u16 guc_class)
 {
 	struct xe_hw_engine *hwe;
 	enum xe_hw_engine_id id;
 	u32 mask = 0;
 
 	for_each_hw_engine(hwe, gt, id)
-		if (hwe->class == class)
+		if (xe_hwe_to_guc_class(hwe) == guc_class)
 			mask |= BIT(hwe->instance);
+
+	/* We expect at most one paging engine per GuC instance, for now */
+	if (guc_class == GUC_PAGING_CLASS)
+		xe_gt_assert(gt, !mask || is_power_of_2(mask));
 
 	return mask;
 }
@@ -270,10 +275,13 @@ static size_t calculate_golden_lrc_size(struct xe_guc_ads *ads)
 {
 	struct xe_gt *gt = ads_to_gt(ads);
 	size_t total_size = 0, alloc_size, real_size;
-	int class;
+	u16 guc_class;
 
-	for (class = 0; class < XE_ENGINE_CLASS_MAX; ++class) {
-		if (!engine_enable_mask(gt, class))
+	for (guc_class = 0; guc_class <= GUC_LAST_ENGINE_CLASS; ++guc_class) {
+		enum xe_engine_class class =
+			guc_class_to_engine_class(guc_class);
+
+		if (!engine_enable_mask(gt, guc_class))
 			continue;
 
 		real_size = xe_gt_lrc_size(gt, class);
@@ -284,52 +292,26 @@ static size_t calculate_golden_lrc_size(struct xe_guc_ads *ads)
 	return total_size;
 }
 
-static void guc_waklv_enable_one_word(struct xe_guc_ads *ads,
-				      enum xe_guc_klv_ids klv_id,
-				      u32 value,
-				      u32 *offset, u32 *remain)
+static void guc_waklv_enable(struct xe_guc_ads *ads,
+			     u32 data[], u32 data_len_dw,
+			     u32 *offset, u32 *remain,
+			     enum xe_guc_klv_ids klv_id)
 {
-	u32 size;
-	u32 klv_entry[] = {
-		/* 16:16 key/length */
-		FIELD_PREP(GUC_KLV_0_KEY, klv_id) |
-		FIELD_PREP(GUC_KLV_0_LEN, 1),
-		value,
-		/* 1 dword data */
-	};
-
-	size = sizeof(klv_entry);
+	size_t size = sizeof(u32) * (1 + data_len_dw);
 
 	if (*remain < size) {
 		drm_warn(&ads_to_xe(ads)->drm,
-			 "w/a klv buffer too small to add klv id %d\n", klv_id);
-	} else {
-		xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), *offset,
-				 klv_entry, size);
-		*offset += size;
-		*remain -= size;
-	}
-}
-
-static void guc_waklv_enable_simple(struct xe_guc_ads *ads,
-				    enum xe_guc_klv_ids klv_id, u32 *offset, u32 *remain)
-{
-	u32 klv_entry[] = {
-		/* 16:16 key/length */
-		FIELD_PREP(GUC_KLV_0_KEY, klv_id) |
-		FIELD_PREP(GUC_KLV_0_LEN, 0),
-		/* 0 dwords data */
-	};
-	u32 size;
-
-	size = sizeof(klv_entry);
-
-	if (xe_gt_WARN(ads_to_gt(ads), *remain < size,
-		       "w/a klv buffer too small to add klv id %d\n", klv_id))
+			 "w/a klv buffer too small to add klv id 0x%04X\n", klv_id);
 		return;
+	}
 
-	xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), *offset,
-			 klv_entry, size);
+	/* 16:16 key/length */
+	xe_map_wr(ads_to_xe(ads), ads_to_map(ads), *offset, u32,
+		  FIELD_PREP(GUC_KLV_0_KEY, klv_id) | FIELD_PREP(GUC_KLV_0_LEN, data_len_dw));
+	/* data_len_dw dwords of data */
+	xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads),
+			 *offset + sizeof(u32), data, data_len_dw * sizeof(u32));
+
 	*offset += size;
 	*remain -= size;
 }
@@ -343,29 +325,76 @@ static void guc_waklv_init(struct xe_guc_ads *ads)
 	offset = guc_ads_waklv_offset(ads);
 	remain = guc_ads_waklv_size(ads);
 
-	if (XE_WA(gt, 14019882105))
-		guc_waklv_enable_simple(ads,
-					GUC_WORKAROUND_KLV_BLOCK_INTERRUPTS_WHEN_MGSR_BLOCKED,
-					&offset, &remain);
-	if (XE_WA(gt, 18024947630))
-		guc_waklv_enable_simple(ads,
-					GUC_WORKAROUND_KLV_ID_GAM_PFQ_SHADOW_TAIL_POLLING,
-					&offset, &remain);
-	if (XE_WA(gt, 16022287689))
-		guc_waklv_enable_simple(ads,
-					GUC_WORKAROUND_KLV_ID_DISABLE_MTP_DURING_ASYNC_COMPUTE,
-					&offset, &remain);
+	if (XE_GT_WA(gt, 16021333562))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_BLOCK_INTERRUPTS_WHEN_MGSR_BLOCKED);
+	if (XE_GT_WA(gt, 18024947630))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_ID_GAM_PFQ_SHADOW_TAIL_POLLING);
+	if (XE_GT_WA(gt, 16022287689))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_ID_DISABLE_MTP_DURING_ASYNC_COMPUTE);
+
+	if (XE_GT_WA(gt, 14022866841))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WA_KLV_WAKE_POWER_DOMAINS_FOR_OUTBOUND_MMIO);
 
 	/*
 	 * On RC6 exit, GuC will write register 0xB04 with the default value provided. As of now,
 	 * the default value for this register is determined to be 0xC40. This could change in the
 	 * future, so GuC depends on KMD to send it the correct value.
 	 */
-	if (XE_WA(gt, 13011645652))
-		guc_waklv_enable_one_word(ads,
-					  GUC_WA_KLV_NP_RD_WRITE_TO_CLEAR_RCSM_AT_CGP_LATE_RESTORE,
-					  0xC40,
-					  &offset, &remain);
+	if (XE_GT_WA(gt, 13011645652)) {
+		u32 data = 0xC40;
+
+		guc_waklv_enable(ads, &data, 1, &offset, &remain,
+				 GUC_WA_KLV_NP_RD_WRITE_TO_CLEAR_RCSM_AT_CGP_LATE_RESTORE);
+	}
+
+	if (XE_GT_WA(gt, 14022293748) || XE_GT_WA(gt, 22019794406))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_ID_BACK_TO_BACK_RCS_ENGINE_RESET);
+
+	if (GUC_FIRMWARE_VER_AT_LEAST(&gt->uc.guc, 70, 44) && XE_GT_WA(gt, 16026508708))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WA_KLV_RESET_BB_STACK_PTR_ON_VF_SWITCH);
+	if (GUC_FIRMWARE_VER_AT_LEAST(&gt->uc.guc, 70, 47) && XE_GT_WA(gt, 16026007364)) {
+		u32 data[] = {
+			0x0,
+			0xF,
+		};
+		guc_waklv_enable(ads, data, ARRAY_SIZE(data), &offset, &remain,
+				 GUC_WA_KLV_RESTORE_UNSAVED_MEDIA_CONTROL_REG);
+	}
+
+	if (XE_GT_WA(gt, 14020001231))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WORKAROUND_KLV_DISABLE_PSMI_INTERRUPTS_AT_C6_ENTRY_RESTORE_AT_EXIT);
+	if (XE_GT_WA(gt, 14025515070) && GUC_FIRMWARE_VER_AT_LEAST(&gt->uc.guc, 70, 53))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WA_KLV_CLR_CS_INDIRECT_RING_STATE_IF_IDLE_AT_CTX_REG);
+
+	if (XE_GT_WA(gt, 22022079272) && GUC_FIRMWARE_VER_AT_LEAST(&gt->uc.guc, 70, 62))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain, GUC_WA_KLV_REMAP_RANGED_TLB_INV);
+
+	/* The GuC does not enable the sem_tok_64 feature on NVL-S */
+	if (XE_GT_WA(gt, 16029897822) && gt_to_xe(gt)->info.platform != XE_NOVALAKE_S &&
+	    GUC_FIRMWARE_VER_AT_LEAST(&gt->uc.guc, 70, 69))
+		guc_waklv_enable(ads, NULL, 0, &offset, &remain,
+				 GUC_WA_KLV_IGNORE_MMIO_READ_SEM_TOKEN_64);
+
+	/*
+	 * On GuC firmware 70.66 and above, use the Feature KLV (shared with the
+	 * WA KLV buffer); older firmware uses GUC_CTL_DISABLE_MULTI_QUEUE in
+	 * the init params instead.
+	 */
+	if (!xe_configfs_get_enable_multi_queue(to_pci_dev(gt_to_xe(gt)->drm.dev)) &&
+	    GUC_FIRMWARE_VER_AT_LEAST(&gt->uc.guc, 70, 66)) {
+		u32 data = 1;
+
+		guc_waklv_enable(ads, &data, 1, &offset, &remain,
+				 GUC_FEATURE_KLV_DISABLE_MULTI_QUEUE);
+	}
 
 	size = guc_ads_waklv_size(ads) - remain;
 	if (!size)
@@ -398,28 +427,74 @@ int xe_guc_ads_init(struct xe_guc_ads *ads)
 	struct xe_bo *bo;
 
 	ads->golden_lrc_size = calculate_golden_lrc_size(ads);
+	ads->capture_size = xe_guc_capture_ads_input_worst_size(ads_to_guc(ads));
 	ads->regset_size = calculate_regset_size(gt);
 	ads->ads_waklv_size = calculate_waklv_size(ads);
 
 	bo = xe_managed_bo_create_pin_map(xe, tile, guc_ads_size(ads) + MAX_GOLDEN_LRC_SIZE,
 					  XE_BO_FLAG_SYSTEM |
 					  XE_BO_FLAG_GGTT |
-					  XE_BO_FLAG_GGTT_INVALIDATE);
+					  XE_BO_FLAG_GGTT_INVALIDATE |
+					  XE_BO_FLAG_PINNED_NORESTORE);
 	if (IS_ERR(bo))
 		return PTR_ERR(bo);
 
 	ads->bo = bo;
 
+	if (xe->info.has_usm) {
+		/*
+		 * Allocate a separate BO for the HW fault ring (UM queues).
+		 *
+		 * Round the size up to the next power of two so that on iGPU
+		 * (system memory, no IOMMU) the TTM pool issues a single
+		 * alloc_pages(order=N) call, maximising the chance of getting
+		 * a physically contiguous block.  GuC requires contiguous DPA.
+		 */
+		size_t um_size = IS_DGFX(xe) ?
+				 GUC_UM_QUEUE_SIZE * GUC_UM_HW_QUEUE_MAX :
+				 roundup_pow_of_two(GUC_UM_QUEUE_SIZE *
+						    GUC_UM_HW_QUEUE_MAX);
+
+		u32 um_flags = XE_BO_FLAG_VRAM_IF_DGFX(tile) |
+			       XE_BO_FLAG_GGTT |
+			       XE_BO_FLAG_GGTT_INVALIDATE |
+			       XE_BO_FLAG_PINNED_NORESTORE |
+			       XE_BO_FLAG_NEEDS_UC;
+
+		bo = xe_managed_bo_create_pin_map(xe, tile, um_size, um_flags);
+		if (IS_ERR(bo))
+			return PTR_ERR(bo);
+
+		/*
+		 * On pre-Xe3p platforms, GAM (not GuC) accesses the UM queue
+		 * ring via base_dpa, which must be a contiguous DMA address
+		 * range.  Verify that the allocated pages are contiguous in
+		 * DMA address space.
+		 */
+		if (!xe_bo_is_vram(bo) &&
+		    !xe_guc_using_main_gamctrl_queues(ads_to_guc(ads)) &&
+		    unlikely(!xe_bo_sg_is_contiguous(bo,
+						     GUC_UM_QUEUE_SIZE *
+						     GUC_UM_HW_QUEUE_MAX))) {
+			drm_err(&xe->drm,
+				"UM fault queue memory is not contiguous in DMA address space; GAM requires contiguous DPA\n");
+			return -ENOMEM;
+		}
+
+		ads->um_queue_bo = bo;
+	}
+
 	return 0;
 }
+ALLOW_ERROR_INJECTION(xe_guc_ads_init, ERRNO); /* See xe_pci_probe() */
 
 /**
  * xe_guc_ads_init_post_hwconfig - initialize ADS post hwconfig load
  * @ads: Additional data structures object
  *
- * Recalcuate golden_lrc_size & regset_size as the number hardware engines may
- * have changed after the hwconfig was loaded. Also verify the new sizes fit in
- * the already allocated ADS buffer object.
+ * Recalculate golden_lrc_size, capture_size and regset_size as the number
+ * hardware engines may have changed after the hwconfig was loaded. Also verify
+ * the new sizes fit in the already allocated ADS buffer object.
  *
  * Return: 0 on success, negative error code on error.
  */
@@ -431,6 +506,8 @@ int xe_guc_ads_init_post_hwconfig(struct xe_guc_ads *ads)
 	xe_gt_assert(gt, ads->bo);
 
 	ads->golden_lrc_size = calculate_golden_lrc_size(ads);
+	/* Calculate Capture size with worst size */
+	ads->capture_size = xe_guc_capture_ads_input_worst_size(ads_to_guc(ads));
 	ads->regset_size = calculate_regset_size(gt);
 
 	xe_gt_assert(gt, ads->golden_lrc_size +
@@ -450,7 +527,7 @@ static void guc_policies_init(struct xe_guc_ads *ads)
 	ads_blob_write(ads, policies.max_num_work_items,
 		       GLOBAL_POLICY_MAX_NUM_WI);
 
-	if (xe->wedged.mode == 2)
+	if (xe->wedged.mode == XE_WEDGED_MODE_UPON_ANY_HANG_NO_RESET)
 		global_flags |= GLOBAL_POLICY_DISABLE_ENGINE_RESET;
 
 	ads_blob_write(ads, policies.global_flags, global_flags);
@@ -461,40 +538,80 @@ static void fill_engine_enable_masks(struct xe_gt *gt,
 				     struct iosys_map *info_map)
 {
 	struct xe_device *xe = gt_to_xe(gt);
+	u16 guc_class;
 
-	info_map_write(xe, info_map, engine_enabled_masks[GUC_RENDER_CLASS],
-		       engine_enable_mask(gt, XE_ENGINE_CLASS_RENDER));
-	info_map_write(xe, info_map, engine_enabled_masks[GUC_BLITTER_CLASS],
-		       engine_enable_mask(gt, XE_ENGINE_CLASS_COPY));
-	info_map_write(xe, info_map, engine_enabled_masks[GUC_VIDEO_CLASS],
-		       engine_enable_mask(gt, XE_ENGINE_CLASS_VIDEO_DECODE));
-	info_map_write(xe, info_map,
-		       engine_enabled_masks[GUC_VIDEOENHANCE_CLASS],
-		       engine_enable_mask(gt, XE_ENGINE_CLASS_VIDEO_ENHANCE));
-	info_map_write(xe, info_map, engine_enabled_masks[GUC_COMPUTE_CLASS],
-		       engine_enable_mask(gt, XE_ENGINE_CLASS_COMPUTE));
-	info_map_write(xe, info_map, engine_enabled_masks[GUC_GSC_OTHER_CLASS],
-		       engine_enable_mask(gt, XE_ENGINE_CLASS_OTHER));
+	for (guc_class = 0; guc_class <= GUC_LAST_ENGINE_CLASS; ++guc_class)
+		info_map_write(xe, info_map, engine_enabled_masks[guc_class],
+			       engine_enable_mask(gt, guc_class));
 }
 
-static void guc_prep_golden_lrc_null(struct xe_guc_ads *ads)
+u16 xe_hwe_to_guc_class(struct xe_hw_engine *hwe)
+{
+	if (xe_guc_has_paging_engine(&hwe->gt->uc.guc) &&
+	    xe_gt_is_usm_hwe(hwe->gt, hwe))
+		return GUC_PAGING_CLASS;
+
+	switch (hwe->class) {
+	case XE_ENGINE_CLASS_RENDER:
+		return GUC_RENDER_CLASS;
+	case XE_ENGINE_CLASS_VIDEO_DECODE:
+		return GUC_VIDEO_CLASS;
+	case XE_ENGINE_CLASS_VIDEO_ENHANCE:
+		return GUC_VIDEOENHANCE_CLASS;
+	case XE_ENGINE_CLASS_COPY:
+		return GUC_BLITTER_CLASS;
+	case XE_ENGINE_CLASS_COMPUTE:
+		return GUC_COMPUTE_CLASS;
+	case XE_ENGINE_CLASS_OTHER:
+		return GUC_GSC_OTHER_CLASS;
+	default:
+		XE_WARN_ON(hwe->class);
+		return -1;
+	}
+}
+
+/*
+ * Write the offsets corresponding to the golden LRCs. The actual data is
+ * populated later by guc_golden_lrc_populate()
+ */
+static void guc_golden_lrc_init(struct xe_guc_ads *ads)
 {
 	struct xe_device *xe = ads_to_xe(ads);
+	struct xe_gt *gt = ads_to_gt(ads);
 	struct iosys_map info_map = IOSYS_MAP_INIT_OFFSET(ads_to_map(ads),
 			offsetof(struct __guc_ads_blob, system_info));
-	u8 guc_class;
+	size_t alloc_size, real_size;
+	u32 addr_ggtt, offset;
+	u16 guc_class;
 
-	for (guc_class = 0; guc_class <= GUC_MAX_ENGINE_CLASSES; ++guc_class) {
+	offset = guc_ads_golden_lrc_offset(ads);
+	addr_ggtt = xe_bo_ggtt_addr(ads->bo) + offset;
+
+	for (guc_class = 0; guc_class <= GUC_LAST_ENGINE_CLASS; ++guc_class) {
+		enum xe_engine_class class =
+			guc_class_to_engine_class(guc_class);
+
 		if (!info_map_read(xe, &info_map,
 				   engine_enabled_masks[guc_class]))
 			continue;
 
+		real_size = xe_gt_lrc_size(gt, class);
+		alloc_size = PAGE_ALIGN(real_size);
+
+		/*
+		 * This interface is slightly confusing. We need to pass the
+		 * base address of the full golden context and the size of just
+		 * the engine state, which is the section of the context image
+		 * that starts after the execlists LRC registers. This is
+		 * required to allow the GuC to restore just the engine state
+		 * when a watchdog reset occurs.
+		 */
 		ads_blob_write(ads, ads.eng_state_size[guc_class],
-			       guc_ads_golden_lrc_size(ads) -
-			       xe_lrc_skip_size(xe));
+			       xe_lrc_engine_state_size(gt, class));
 		ads_blob_write(ads, ads.golden_context_lrca[guc_class],
-			       xe_bo_ggtt_addr(ads->bo) +
-			       guc_ads_golden_lrc_offset(ads));
+			       addr_ggtt);
+
+		addr_ggtt += alloc_size;
 	}
 }
 
@@ -521,29 +638,163 @@ static void guc_mapping_table_init(struct xe_gt *gt,
 	guc_mapping_table_init_invalid(gt, info_map);
 
 	for_each_hw_engine(hwe, gt, id) {
+		u16 guc_logical_instance;
 		u8 guc_class;
 
-		guc_class = xe_engine_class_to_guc_class(hwe->class);
+		guc_class = xe_hwe_to_guc_class(hwe);
+		guc_logical_instance = xe_hwe_guc_logical_instance(hwe);
+
 		info_map_write(xe, info_map,
-			       mapping_table[guc_class][hwe->logical_instance],
+			       mapping_table[guc_class][guc_logical_instance],
 			       hwe->instance);
 	}
 }
 
-static void guc_capture_list_init(struct xe_guc_ads *ads)
+static u32 guc_get_capture_engine_mask(struct xe_gt *gt, struct iosys_map *info_map,
+				       enum guc_capture_list_class_type capture_class)
 {
-	int i, j;
-	u32 addr = xe_bo_ggtt_addr(ads->bo) + guc_ads_capture_offset(ads);
+	struct xe_device *xe = gt_to_xe(gt);
+	u32 mask;
 
-	/* FIXME: Populate a proper capture list */
+	switch (capture_class) {
+	case GUC_CAPTURE_LIST_CLASS_RENDER_COMPUTE:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_RENDER_CLASS]);
+		mask |= info_map_read(xe, info_map, engine_enabled_masks[GUC_COMPUTE_CLASS]);
+		break;
+	case GUC_CAPTURE_LIST_CLASS_VIDEO:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_VIDEO_CLASS]);
+		break;
+	case GUC_CAPTURE_LIST_CLASS_VIDEOENHANCE:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_VIDEOENHANCE_CLASS]);
+		break;
+	case GUC_CAPTURE_LIST_CLASS_BLITTER:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_BLITTER_CLASS]);
+		break;
+	case GUC_CAPTURE_LIST_CLASS_GSC_OTHER:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_GSC_OTHER_CLASS]);
+		break;
+	case GUC_CAPTURE_LIST_CLASS_PAGING:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_PAGING_CLASS]);
+		break;
+	default:
+		mask = 0;
+	}
+
+	return mask;
+}
+
+static inline bool get_capture_list(struct xe_guc_ads *ads, struct xe_guc *guc, struct xe_gt *gt,
+				    int owner, int type, int class, u32 *total_size, size_t *size,
+				    void **pptr)
+{
+	*size = 0;
+
+	if (!xe_guc_capture_getlistsize(guc, owner, type, class, size)) {
+		if (*total_size + *size > ads->capture_size)
+			xe_gt_dbg(gt, "Capture size overflow :%zu vs %d\n",
+				  *total_size + *size, ads->capture_size);
+		else if (!xe_guc_capture_getlist(guc, owner, type, class, pptr))
+			return false;
+	}
+
+	return true;
+}
+
+static int guc_capture_prep_lists(struct xe_guc_ads *ads)
+{
+	struct xe_guc *guc = ads_to_guc(ads);
+	struct xe_gt *gt = ads_to_gt(ads);
+	u32 ads_ggtt, capture_offset, null_ggtt, total_size = 0;
+	struct iosys_map info_map;
+	size_t size = 0;
+	void *ptr;
+	int i, j;
+
+	/*
+	 * GuC Capture's steered reg-list needs to be allocated and initialized
+	 * after the GuC-hwconfig is available which guaranteed from here.
+	 */
+	xe_guc_capture_steered_list_init(ads_to_guc(ads));
+
+	capture_offset = guc_ads_capture_offset(ads);
+	ads_ggtt = xe_bo_ggtt_addr(ads->bo);
+	info_map = IOSYS_MAP_INIT_OFFSET(ads_to_map(ads),
+					 offsetof(struct __guc_ads_blob, system_info));
+
+	/* first, set aside the first page for a capture_list with zero descriptors */
+	total_size = PAGE_SIZE;
+	if (!xe_guc_capture_getnullheader(guc, &ptr, &size))
+		xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), capture_offset, ptr, size);
+
+	null_ggtt = ads_ggtt + capture_offset;
+	capture_offset += PAGE_SIZE;
+
+	/*
+	 * Populate capture list : at this point adps is already allocated and
+	 * mapped to worst case size
+	 */
 	for (i = 0; i < GUC_CAPTURE_LIST_INDEX_MAX; i++) {
-		for (j = 0; j < GUC_MAX_ENGINE_CLASSES; j++) {
-			ads_blob_write(ads, ads.capture_instance[i][j], addr);
-			ads_blob_write(ads, ads.capture_class[i][j], addr);
+		bool write_empty_list;
+
+		for (j = 0; j < GUC_CAPTURE_LIST_CLASS_MAX; j++) {
+			u32 engine_mask = guc_get_capture_engine_mask(gt, &info_map, j);
+			/* null list if we dont have said engine or list */
+			if (!engine_mask) {
+				ads_blob_write(ads, ads.capture_class[i][j], null_ggtt);
+				ads_blob_write(ads, ads.capture_instance[i][j], null_ggtt);
+				continue;
+			}
+
+			/* engine exists: start with engine-class registers */
+			write_empty_list = get_capture_list(ads, guc, gt, i,
+							    GUC_STATE_CAPTURE_TYPE_ENGINE_CLASS,
+							    j, &total_size, &size, &ptr);
+			if (!write_empty_list) {
+				ads_blob_write(ads, ads.capture_class[i][j],
+					       ads_ggtt + capture_offset);
+				xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), capture_offset,
+						 ptr, size);
+				total_size += size;
+				capture_offset += size;
+			} else {
+				ads_blob_write(ads, ads.capture_class[i][j], null_ggtt);
+			}
+
+			/* engine exists: next, engine-instance registers   */
+			write_empty_list = get_capture_list(ads, guc, gt, i,
+							    GUC_STATE_CAPTURE_TYPE_ENGINE_INSTANCE,
+							    j, &total_size, &size, &ptr);
+			if (!write_empty_list) {
+				ads_blob_write(ads, ads.capture_instance[i][j],
+					       ads_ggtt + capture_offset);
+				xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), capture_offset,
+						 ptr, size);
+				total_size += size;
+				capture_offset += size;
+			} else {
+				ads_blob_write(ads, ads.capture_instance[i][j], null_ggtt);
+			}
 		}
 
-		ads_blob_write(ads, ads.capture_global[i], addr);
+		/* global registers is last in our PF/VF loops */
+		write_empty_list = get_capture_list(ads, guc, gt, i,
+						    GUC_STATE_CAPTURE_TYPE_GLOBAL,
+						    0, &total_size, &size, &ptr);
+		if (!write_empty_list) {
+			ads_blob_write(ads, ads.capture_global[i], ads_ggtt + capture_offset);
+			xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), capture_offset, ptr,
+					 size);
+			total_size += size;
+			capture_offset += size;
+		} else {
+			ads_blob_write(ads, ads.capture_global[i], null_ggtt);
+		}
 	}
+
+	if (ads->capture_size != PAGE_ALIGN(total_size))
+		xe_gt_dbg(gt, "Updated ADS capture size %d (was %d)\n",
+			  PAGE_ALIGN(total_size), ads->capture_size);
+	return PAGE_ALIGN(total_size);
 }
 
 static void guc_mmio_regset_write_one(struct xe_guc_ads *ads,
@@ -556,6 +807,20 @@ static void guc_mmio_regset_write_one(struct xe_guc_ads *ads,
 		.flags = reg.masked ? GUC_REGSET_MASKED : 0,
 	};
 
+	if (reg.mcr) {
+		struct xe_reg_mcr mcr_reg = XE_REG_MCR(reg.addr);
+		u8 group, instance;
+
+		bool steer = xe_gt_mcr_get_nonterminated_steering(ads_to_gt(ads), mcr_reg,
+								  &group, &instance);
+
+		if (steer) {
+			entry.flags |= FIELD_PREP(GUC_REGSET_STEERING_GROUP, group);
+			entry.flags |= FIELD_PREP(GUC_REGSET_STEERING_INSTANCE, instance);
+			entry.flags |= GUC_REGSET_STEERING_NEEDED;
+		}
+	}
+
 	xe_map_memcpy_to(ads_to_xe(ads), regset_map, n_entry * sizeof(entry),
 			 &entry, sizeof(entry));
 }
@@ -564,7 +829,6 @@ static unsigned int guc_mmio_regset_write(struct xe_guc_ads *ads,
 					  struct iosys_map *regset_map,
 					  struct xe_hw_engine *hwe)
 {
-	struct xe_device *xe = ads_to_xe(ads);
 	struct xe_hw_engine *hwe_rcs_reset_domain =
 		xe_gt_any_hw_engine_by_reset_domain(hwe->gt, XE_ENGINE_CLASS_RENDER);
 	struct xe_reg_sr_entry *entry;
@@ -574,10 +838,8 @@ static unsigned int guc_mmio_regset_write(struct xe_guc_ads *ads,
 		struct xe_reg reg;
 		bool skip;
 	} *e, extra_regs[] = {
-		{ .reg = RING_MODE(hwe->mmio_base),			},
 		{ .reg = RING_HWS_PGA(hwe->mmio_base),			},
 		{ .reg = RING_IMR(hwe->mmio_base),			},
-		{ .reg = RCU_MODE, .skip = hwe != hwe_rcs_reset_domain	},
 		{ .reg = CCS_MODE,
 		  .skip = hwe != hwe_rcs_reset_domain || !xe_gt_ccs_mode_enabled(hwe->gt) },
 	};
@@ -595,13 +857,17 @@ static unsigned int guc_mmio_regset_write(struct xe_guc_ads *ads,
 		guc_mmio_regset_write_one(ads, regset_map, e->reg, count++);
 	}
 
-	/* Wa_1607983814 */
-	if (needs_wa_1607983814(xe) && hwe->class == XE_ENGINE_CLASS_RENDER) {
+	if (XE_GT_WA(hwe->gt, 1607983814) && hwe->class == XE_ENGINE_CLASS_RENDER) {
 		for (i = 0; i < LNCFCMOCS_REG_COUNT; i++) {
 			guc_mmio_regset_write_one(ads, regset_map,
 						  XELP_LNCFCMOCS(i), count++);
 		}
 	}
+
+	if (XE_GT_WA(hwe->gt, 16023105232))
+		guc_mmio_regset_write_one(ads, regset_map,
+					  RING_IDLEDLY(hwe->mmio_base),
+					  count++);
 
 	return count;
 }
@@ -635,7 +901,7 @@ static void guc_mmio_reg_state_init(struct xe_guc_ads *ads)
 		 * 2. Record in the header (ads.reg_state_list) the address
 		 * location and number of entries
 		 */
-		gc = xe_engine_class_to_guc_class(hwe->class);
+		gc = xe_hwe_to_guc_class(hwe);
 		ads_blob_write(ads, ads.reg_state_list[gc][hwe->instance].address, addr);
 		ads_blob_write(ads, ads.reg_state_list[gc][hwe->instance].count, count);
 
@@ -650,17 +916,38 @@ static void guc_mmio_reg_state_init(struct xe_guc_ads *ads)
 
 static void guc_um_init_params(struct xe_guc_ads *ads)
 {
-	u32 um_queue_offset = guc_ads_um_queues_offset(ads);
+	struct xe_bo *um_bo = ads->um_queue_bo;
+	struct xe_guc *guc = ads_to_guc(ads);
+	struct xe_device *xe = ads_to_xe(ads);
 	u64 base_dpa;
 	u32 base_ggtt;
+	bool with_dpa;
 	int i;
 
-	base_ggtt = xe_bo_ggtt_addr(ads->bo) + um_queue_offset;
-	base_dpa = xe_bo_main_addr(ads->bo, PAGE_SIZE) + um_queue_offset;
+	with_dpa = !xe_guc_using_main_gamctrl_queues(guc);
+
+	if (um_bo) {
+		/* All USM platforms: UM queues in dedicated um_queue_bo */
+		base_ggtt = xe_bo_ggtt_addr(um_bo);
+		base_dpa = xe_bo_main_addr(um_bo, PAGE_SIZE);
+	} else {
+		/* Platform does not support USM: no UM queues, nothing to do */
+		return;
+	}
 
 	for (i = 0; i < GUC_UM_HW_QUEUE_MAX; ++i) {
+		/*
+		 * Some platforms support USM but not access counters.
+		 * Skip ACCESS_COUNTER queue initialization for such
+		 * platforms, leaving queue_params[2] zero-initialized
+		 * to signal unavailability to the GuC.
+		 */
+		if (i == GUC_UM_HW_QUEUE_ACCESS_COUNTER &&
+		    !xe->info.has_access_counter)
+			continue;
+
 		ads_blob_write(ads, um_init_params.queue_params[i].base_dpa,
-			       base_dpa + (i * GUC_UM_QUEUE_SIZE));
+			       with_dpa ? (base_dpa + (i * GUC_UM_QUEUE_SIZE)) : 0);
 		ads_blob_write(ads, um_init_params.queue_params[i].base_ggtt_address,
 			       base_ggtt + (i * GUC_UM_QUEUE_SIZE));
 		ads_blob_write(ads, um_init_params.queue_params[i].size_in_bytes,
@@ -678,7 +965,7 @@ static void guc_doorbell_init(struct xe_guc_ads *ads)
 
 	if (GRAPHICS_VER(xe) >= 12 && !IS_DGFX(xe)) {
 		u32 distdbreg =
-			xe_mmio_read32(gt, DIST_DBS_POPULATED);
+			xe_mmio_read32(&gt->mmio, DIST_DBS_POPULATED);
 
 		ads_blob_write(ads,
 			       system_info.generic_gt_sysinfo[GUC_GENERIC_GT_SYSINFO_DOORBELL_COUNT_PER_SQIDI],
@@ -702,9 +989,9 @@ void xe_guc_ads_populate_minimal(struct xe_guc_ads *ads)
 
 	xe_gt_assert(gt, ads->bo);
 
-	xe_map_memset(ads_to_xe(ads), ads_to_map(ads), 0, 0, ads->bo->size);
+	xe_map_memset(ads_to_xe(ads), ads_to_map(ads), 0, 0, xe_bo_size(ads->bo));
 	guc_policies_init(ads);
-	guc_prep_golden_lrc_null(ads);
+	guc_golden_lrc_init(ads);
 	guc_mapping_table_init_invalid(gt, &info_map);
 	guc_doorbell_init(ads);
 
@@ -726,13 +1013,13 @@ void xe_guc_ads_populate(struct xe_guc_ads *ads)
 
 	xe_gt_assert(gt, ads->bo);
 
-	xe_map_memset(ads_to_xe(ads), ads_to_map(ads), 0, 0, ads->bo->size);
+	xe_map_memset(ads_to_xe(ads), ads_to_map(ads), 0, 0, xe_bo_size(ads->bo));
 	guc_policies_init(ads);
 	fill_engine_enable_masks(gt, &info_map);
 	guc_mmio_reg_state_init(ads);
-	guc_prep_golden_lrc_null(ads);
+	guc_golden_lrc_init(ads);
 	guc_mapping_table_init(gt, &info_map);
-	guc_capture_list_init(ads);
+	guc_capture_prep_lists(ads);
 	guc_doorbell_init(ads);
 	guc_waklv_init(ads);
 
@@ -750,23 +1037,26 @@ void xe_guc_ads_populate(struct xe_guc_ads *ads)
 		       guc_ads_private_data_offset(ads));
 }
 
-static void guc_populate_golden_lrc(struct xe_guc_ads *ads)
+/*
+ * After the golden LRC's are recorded for each engine class by the first
+ * submission, copy them to the ADS, as initialized earlier by
+ * guc_golden_lrc_init().
+ */
+static void guc_golden_lrc_populate(struct xe_guc_ads *ads)
 {
 	struct xe_device *xe = ads_to_xe(ads);
 	struct xe_gt *gt = ads_to_gt(ads);
 	struct iosys_map info_map = IOSYS_MAP_INIT_OFFSET(ads_to_map(ads),
 			offsetof(struct __guc_ads_blob, system_info));
 	size_t total_size = 0, alloc_size, real_size;
-	u32 addr_ggtt, offset;
-	int class;
+	u32 offset;
+	u16 guc_class;
 
 	offset = guc_ads_golden_lrc_offset(ads);
-	addr_ggtt = xe_bo_ggtt_addr(ads->bo) + offset;
 
-	for (class = 0; class < XE_ENGINE_CLASS_MAX; ++class) {
-		u8 guc_class;
-
-		guc_class = xe_engine_class_to_guc_class(class);
+	for (guc_class = 0; guc_class <= GUC_LAST_ENGINE_CLASS; ++guc_class) {
+		enum xe_engine_class class =
+			guc_class_to_engine_class(guc_class);
 
 		if (!info_map_read(xe, &info_map,
 				   engine_enabled_masks[guc_class]))
@@ -778,26 +1068,9 @@ static void guc_populate_golden_lrc(struct xe_guc_ads *ads)
 		alloc_size = PAGE_ALIGN(real_size);
 		total_size += alloc_size;
 
-		/*
-		 * This interface is slightly confusing. We need to pass the
-		 * base address of the full golden context and the size of just
-		 * the engine state, which is the section of the context image
-		 * that starts after the execlists LRC registers. This is
-		 * required to allow the GuC to restore just the engine state
-		 * when a watchdog reset occurs.
-		 * We calculate the engine state size by removing the size of
-		 * what comes before it in the context image (which is identical
-		 * on all engines).
-		 */
-		ads_blob_write(ads, ads.eng_state_size[guc_class],
-			       real_size - xe_lrc_skip_size(xe));
-		ads_blob_write(ads, ads.golden_context_lrca[guc_class],
-			       addr_ggtt);
-
 		xe_map_memcpy_to(xe, ads_to_map(ads), offset,
 				 gt->default_lrc[class], real_size);
 
-		addr_ggtt += alloc_size;
 		offset += alloc_size;
 	}
 
@@ -806,7 +1079,7 @@ static void guc_populate_golden_lrc(struct xe_guc_ads *ads)
 
 void xe_guc_ads_populate_post_load(struct xe_guc_ads *ads)
 {
-	guc_populate_golden_lrc(ads);
+	guc_golden_lrc_populate(ads);
 }
 
 static int guc_ads_action_update_policies(struct xe_guc_ads *ads, u32 policy_offset)
@@ -823,42 +1096,33 @@ static int guc_ads_action_update_policies(struct xe_guc_ads *ads, u32 policy_off
 /**
  * xe_guc_ads_scheduler_policy_toggle_reset - Toggle reset policy
  * @ads: Additional data structures object
+ * @enable_engine_reset: true to enable engine resets, false otherwise
  *
- * This function update the GuC's engine reset policy based on wedged.mode.
+ * This function update the GuC's engine reset policy.
  *
  * Return: 0 on success, and negative error code otherwise.
  */
-int xe_guc_ads_scheduler_policy_toggle_reset(struct xe_guc_ads *ads)
+int xe_guc_ads_scheduler_policy_toggle_reset(struct xe_guc_ads *ads,
+					     bool enable_engine_reset)
 {
-	struct xe_device *xe = ads_to_xe(ads);
-	struct xe_gt *gt = ads_to_gt(ads);
-	struct xe_tile *tile = gt_to_tile(gt);
 	struct guc_policies *policies;
-	struct xe_bo *bo;
-	int ret = 0;
+	struct xe_guc *guc = ads_to_guc(ads);
+	CLASS(xe_guc_buf, buf)(&guc->buf, sizeof(*policies));
 
-	policies = kmalloc(sizeof(*policies), GFP_KERNEL);
-	if (!policies)
-		return -ENOMEM;
+	if (!xe_guc_buf_is_valid(buf))
+		return -ENOBUFS;
+
+	policies = xe_guc_buf_cpu_ptr(buf);
+	memset(policies, 0, sizeof(*policies));
 
 	policies->dpc_promote_time = ads_blob_read(ads, policies.dpc_promote_time);
 	policies->max_num_work_items = ads_blob_read(ads, policies.max_num_work_items);
 	policies->is_valid = 1;
-	if (xe->wedged.mode == 2)
-		policies->global_flags |= GLOBAL_POLICY_DISABLE_ENGINE_RESET;
-	else
+
+	if (enable_engine_reset)
 		policies->global_flags &= ~GLOBAL_POLICY_DISABLE_ENGINE_RESET;
+	else
+		policies->global_flags |= GLOBAL_POLICY_DISABLE_ENGINE_RESET;
 
-	bo = xe_managed_bo_create_from_data(xe, tile, policies, sizeof(struct guc_policies),
-					    XE_BO_FLAG_VRAM_IF_DGFX(tile) |
-					    XE_BO_FLAG_GGTT);
-	if (IS_ERR(bo)) {
-		ret = PTR_ERR(bo);
-		goto out;
-	}
-
-	ret = guc_ads_action_update_policies(ads, xe_bo_ggtt_addr(bo));
-out:
-	kfree(policies);
-	return ret;
+	return guc_ads_action_update_policies(ads, xe_guc_buf_flush(buf));
 }

@@ -214,10 +214,8 @@ static int config_irq(void *ctx, struct platform_device *pdev)
 
 	rc = devm_request_irq(&pdev->dev, irq, mcr_isr, IRQF_TRIGGER_HIGH,
 			      DRV_NAME, ctx);
-	if (rc) {
-		dev_err(&pdev->dev, "unable to request irq %d\n", irq);
+	if (rc)
 		return rc;
-	}
 
 	/* enable interrupts */
 	regmap_update_bits(aspeed_regmap, ASPEED_MCR_INTR_CTRL,
@@ -387,7 +385,7 @@ static struct platform_driver aspeed_driver = {
 		.of_match_table = aspeed_of_match
 	},
 	.probe		= aspeed_probe,
-	.remove_new	= aspeed_remove
+	.remove		= aspeed_remove
 };
 module_platform_driver(aspeed_driver);
 

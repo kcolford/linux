@@ -56,6 +56,8 @@
 
 #define MAC_DST_FWD "00:11:22:33:44:55"
 #define MAC_DST "00:22:33:44:55:66"
+#define MAC_SRC_FWD "00:33:44:55:66:77"
+#define MAC_SRC "00:44:55:66:77:88"
 
 #define IFADDR_STR_LEN 18
 #define PING_ARGS "-i 0.2 -c 3 -w 10 -q"
@@ -68,6 +70,7 @@
 		__FILE__, __LINE__, strerror(errno), ##__VA_ARGS__)
 
 static const char * const namespaces[] = {NS_SRC, NS_FWD, NS_DST, NULL};
+static struct netns_obj *netns_objs[3];
 
 static int write_file(const char *path, const char *newval)
 {
@@ -87,27 +90,41 @@ static int write_file(const char *path, const char *newval)
 
 static int netns_setup_namespaces(const char *verb)
 {
+	struct netns_obj **ns_obj = netns_objs;
 	const char * const *ns = namespaces;
-	char cmd[128];
 
 	while (*ns) {
-		snprintf(cmd, sizeof(cmd), "ip netns %s %s", verb, *ns);
-		if (!ASSERT_OK(system(cmd), cmd))
-			return -1;
+		if (strcmp(verb, "add") == 0) {
+			*ns_obj = netns_new(*ns, false);
+			if (!ASSERT_OK_PTR(*ns_obj, "netns_new"))
+				return -1;
+		} else {
+			if (!ASSERT_OK_PTR(*ns_obj, "netns_obj is NULL"))
+				return -1;
+			netns_free(*ns_obj);
+			*ns_obj = NULL;
+		}
 		ns++;
+		ns_obj++;
 	}
 	return 0;
 }
 
 static void netns_setup_namespaces_nofail(const char *verb)
 {
+	struct netns_obj **ns_obj = netns_objs;
 	const char * const *ns = namespaces;
-	char cmd[128];
 
 	while (*ns) {
-		snprintf(cmd, sizeof(cmd), "ip netns %s %s > /dev/null 2>&1", verb, *ns);
-		system(cmd);
+		if (strcmp(verb, "add") == 0) {
+			*ns_obj = netns_new(*ns, false);
+		} else {
+			if (*ns_obj)
+				netns_free(*ns_obj);
+			*ns_obj = NULL;
+		}
 		ns++;
+		ns_obj++;
 	}
 }
 
@@ -175,6 +192,8 @@ static int create_netkit(int mode, char *prim, char *peer)
 	req.n.nlmsg_len += sizeof(struct ifinfomsg);
 	addattr_l(&req.n, sizeof(req), IFLA_IFNAME, peer, strlen(peer));
 	addattr_nest_end(&req.n, peer_info);
+	addattr32(&req.n, sizeof(req), IFLA_NETKIT_SCRUB,
+		  NETKIT_SCRUB_NONE);
 	addattr_nest_end(&req.n, data);
 	addattr_nest_end(&req.n, linkinfo);
 
@@ -192,11 +211,10 @@ static int netns_setup_links_and_routes(struct netns_setup_result *result)
 	int err;
 
 	if (result->dev_mode == MODE_VETH) {
-		SYS(fail, "ip link add src type veth peer name src_fwd");
-		SYS(fail, "ip link add dst type veth peer name dst_fwd");
-
-		SYS(fail, "ip link set dst_fwd address " MAC_DST_FWD);
-		SYS(fail, "ip link set dst address " MAC_DST);
+		SYS(fail, "ip link add src address " MAC_SRC " type veth "
+			  "peer name src_fwd address " MAC_SRC_FWD);
+		SYS(fail, "ip link add dst address " MAC_DST " type veth "
+			  "peer name dst_fwd address " MAC_DST_FWD);
 	} else if (result->dev_mode == MODE_NETKIT) {
 		err = create_netkit(NETKIT_L3, "src", "src_fwd");
 		if (!ASSERT_OK(err, "create_ifindex_src"))
@@ -389,6 +407,24 @@ fail:
 	return -1;
 }
 
+static struct bpf_link *netns_attach_nk(const char *ns, int ifindex,
+					struct bpf_program *prog)
+{
+	LIBBPF_OPTS(bpf_netkit_opts, optl);
+	struct nstoken *nstoken = NULL;
+	struct bpf_link *link = NULL;
+
+	nstoken = open_netns(ns);
+	if (!ASSERT_OK_PTR(nstoken, "setns"))
+		goto cleanup;
+
+	link = bpf_program__attach_netkit(prog, ifindex, &optl);
+cleanup:
+	if (nstoken)
+		close_netns(nstoken);
+	return link;
+}
+
 static void test_tcp(int family, const char *addr, __u16 port)
 {
 	int listen_fd = -1, accept_fd = -1, client_fd = -1;
@@ -471,7 +507,7 @@ static int set_forwarding(bool enable)
 
 static int __rcv_tstamp(int fd, const char *expected, size_t s, __u64 *tstamp)
 {
-	struct __kernel_timespec pkt_ts = {};
+	struct timespec pkt_ts = {};
 	char ctl[CMSG_SPACE(sizeof(pkt_ts))];
 	struct timespec now_ts;
 	struct msghdr msg = {};
@@ -495,7 +531,7 @@ static int __rcv_tstamp(int fd, const char *expected, size_t s, __u64 *tstamp)
 
 	cmsg = CMSG_FIRSTHDR(&msg);
 	if (cmsg && cmsg->cmsg_level == SOL_SOCKET &&
-	    cmsg->cmsg_type == SO_TIMESTAMPNS_NEW)
+	    cmsg->cmsg_type == SO_TIMESTAMPNS)
 		memcpy(&pkt_ts, CMSG_DATA(cmsg), sizeof(pkt_ts));
 
 	pkt_ns = pkt_ts.tv_sec * NSEC_PER_SEC + pkt_ts.tv_nsec;
@@ -537,9 +573,9 @@ static int wait_netstamp_needed_key(void)
 	if (!ASSERT_GE(srv_fd, 0, "start_server"))
 		goto done;
 
-	err = setsockopt(srv_fd, SOL_SOCKET, SO_TIMESTAMPNS_NEW,
+	err = setsockopt(srv_fd, SOL_SOCKET, SO_TIMESTAMPNS,
 			 &opt, sizeof(opt));
-	if (!ASSERT_OK(err, "setsockopt(SO_TIMESTAMPNS_NEW)"))
+	if (!ASSERT_OK(err, "setsockopt(SO_TIMESTAMPNS)"))
 		goto done;
 
 	cli_fd = connect_to_fd(srv_fd, TIMEOUT_MILLIS);
@@ -621,9 +657,9 @@ static void test_inet_dtime(int family, int type, const char *addr, __u16 port)
 		return;
 
 	/* Ensure the kernel puts the (rcv) timestamp for all skb */
-	err = setsockopt(listen_fd, SOL_SOCKET, SO_TIMESTAMPNS_NEW,
+	err = setsockopt(listen_fd, SOL_SOCKET, SO_TIMESTAMPNS,
 			 &opt, sizeof(opt));
-	if (!ASSERT_OK(err, "setsockopt(SO_TIMESTAMPNS_NEW)"))
+	if (!ASSERT_OK(err, "setsockopt(SO_TIMESTAMPNS)"))
 		goto done;
 
 	if (type == SOCK_STREAM) {
@@ -857,7 +893,7 @@ static void test_tcp_dtime(struct test_tc_dtime *skel, int family, bool bpf_fwd)
 	test_inet_dtime(family, SOCK_STREAM, addr, 50000 + t);
 
 	/* fwdns_prio100 prog does not read delivery_time_type, so
-	 * kernel puts the (rcv) timetamp in __sk_buff->tstamp
+	 * kernel puts the (rcv) timestamp in __sk_buff->tstamp
 	 */
 	ASSERT_EQ(dtimes[INGRESS_FWDNS_P100], 0,
 		  dtime_cnt_str(t, INGRESS_FWDNS_P100));
@@ -1066,6 +1102,53 @@ done:
 	close_netns(nstoken);
 }
 
+static void test_tc_redirect_peer_ing(struct netns_setup_result *setup_result)
+{
+	struct test_tc_peer *skel;
+	struct nstoken *nstoken;
+	int err;
+
+	nstoken = open_netns(NS_FWD);
+	if (!ASSERT_OK_PTR(nstoken, "setns fwd"))
+		return;
+
+	skel = test_tc_peer__open();
+	if (!ASSERT_OK_PTR(skel, "test_tc_peer__open"))
+		goto done;
+
+	skel->rodata->IFINDEX_SRC = setup_result->ifindex_src_fwd;
+	skel->rodata->IFINDEX_DST = setup_result->ifindex_dst_fwd;
+	ASSERT_EQ(bpf_program__set_expected_attach_type(skel->progs.tc_src_ing,
+		  BPF_NETKIT_PRIMARY), 0, "src_prog_attach_type");
+	ASSERT_EQ(bpf_program__set_expected_attach_type(skel->progs.tc_dst_ing,
+		  BPF_NETKIT_PRIMARY), 0, "dst_prog_attach_type");
+
+	err = test_tc_peer__load(skel);
+	if (!ASSERT_OK(err, "test_tc_peer__load"))
+		goto done;
+
+	skel->links.tc_src_ing = netns_attach_nk(NS_SRC,
+						 setup_result->ifindex_src,
+						 skel->progs.tc_src_ing);
+	if (!ASSERT_OK_PTR(skel->links.tc_src_ing, "attach_src"))
+		goto done;
+	skel->links.tc_dst_ing = netns_attach_nk(NS_DST,
+						 setup_result->ifindex_dst,
+						 skel->progs.tc_dst_ing);
+	if (!ASSERT_OK_PTR(skel->links.tc_dst_ing, "attach_dst"))
+		goto done;
+
+	if (!ASSERT_OK(set_forwarding(false), "disable forwarding"))
+		goto done;
+
+	test_connectivity();
+
+done:
+	if (skel)
+		test_tc_peer__destroy(skel);
+	close_netns(nstoken);
+}
+
 static int tun_open(char *name)
 {
 	struct ifreq ifr;
@@ -1079,7 +1162,7 @@ static int tun_open(char *name)
 
 	ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 	if (*name)
-		strncpy(ifr.ifr_name, name, IFNAMSIZ);
+		strscpy(ifr.ifr_name, name);
 
 	err = ioctl(fd, TUNSETIFF, &ifr);
 	if (!ASSERT_OK(err, "ioctl TUNSETIFF"))
@@ -1264,6 +1347,7 @@ static void *test_tc_redirect_run_tests(void *arg)
 
 	RUN_TEST(tc_redirect_peer, MODE_VETH);
 	RUN_TEST(tc_redirect_peer, MODE_NETKIT);
+	RUN_TEST(tc_redirect_peer_ing, MODE_NETKIT);
 	RUN_TEST(tc_redirect_peer_l3, MODE_VETH);
 	RUN_TEST(tc_redirect_peer_l3, MODE_NETKIT);
 	RUN_TEST(tc_redirect_neigh, MODE_VETH);

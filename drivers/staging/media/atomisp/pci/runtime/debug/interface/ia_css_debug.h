@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _IA_CSS_DEBUG_H_
@@ -321,7 +312,7 @@ void ia_css_debug_dump_stream_config(
     const struct ia_css_stream_config *config,
     int num_pipes);
 
-/**
+/*
  * @brief Initialize the debug mode.
  *
  * WARNING:
@@ -333,7 +324,7 @@ void ia_css_debug_dump_stream_config(
  */
 bool ia_css_debug_mode_init(void);
 
-/**
+/*
  * @brief Disable the DMA channel.
  *
  * @param[in]	dma_ID		The ID of the target DMA.
@@ -353,7 +344,7 @@ bool ia_css_debug_mode_disable_dma_channel(
     int dma_ID,
     int channel_id,
     int request_type);
-/**
+/*
  * @brief Enable the DMA channel.
  *
  * @param[in]	dma_ID		The ID of the target DMA.
@@ -372,7 +363,7 @@ bool ia_css_debug_mode_enable_dma_channel(
     int channel_id,
     int request_type);
 
-/**
+/*
  * @brief Dump tracer data.
  * [Currently support is only for SKC]
  *
@@ -382,7 +373,7 @@ bool ia_css_debug_mode_enable_dma_channel(
 void ia_css_debug_dump_trace(void);
 
 /* ISP2401 */
-/**
+/*
  * @brief Program counter dumping (in loop)
  *
  * @param[in]	id		The ID of the SP

@@ -6,7 +6,6 @@
 #include <linux/module.h>
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
 #include "nps_enet.h"
@@ -651,7 +650,7 @@ MODULE_DEVICE_TABLE(of, nps_enet_dt_ids);
 
 static struct platform_driver nps_enet_driver = {
 	.probe = nps_enet_probe,
-	.remove_new = nps_enet_remove,
+	.remove = nps_enet_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table  = nps_enet_dt_ids,

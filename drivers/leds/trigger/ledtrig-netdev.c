@@ -26,6 +26,7 @@
 #include <linux/phy.h>
 #include <linux/rtnetlink.h>
 #include <linux/timer.h>
+#include <net/netdev_lock.h>
 #include "../leds.h"
 
 #define NETDEV_LED_DEFAULT_INTERVAL	50
@@ -39,6 +40,8 @@
  *         (has carrier) or not
  * tx -  LED blinks on transmitted data
  * rx -  LED blinks on receive data
+ * tx_err -  LED blinks on transmit error
+ * rx_err -  LED blinks on receive error
  *
  * Note: If the user selects a mode that is not supported by hw, default
  * behavior is to fall back to software control of the LED. However not every
@@ -126,6 +129,22 @@ static void set_baseline_state(struct led_netdev_data *trigger_data)
 		    trigger_data->link_speed == SPEED_10000)
 			blink_on = true;
 
+		if (test_bit(TRIGGER_NETDEV_LINK_25000, &trigger_data->mode) &&
+		    trigger_data->link_speed == SPEED_25000)
+			blink_on = true;
+
+		if (test_bit(TRIGGER_NETDEV_LINK_40000, &trigger_data->mode) &&
+		    trigger_data->link_speed == SPEED_40000)
+			blink_on = true;
+
+		if (test_bit(TRIGGER_NETDEV_LINK_50000, &trigger_data->mode) &&
+		    trigger_data->link_speed == SPEED_50000)
+			blink_on = true;
+
+		if (test_bit(TRIGGER_NETDEV_LINK_100000, &trigger_data->mode) &&
+		    trigger_data->link_speed == SPEED_100000)
+			blink_on = true;
+
 		if (test_bit(TRIGGER_NETDEV_HALF_DUPLEX, &trigger_data->mode) &&
 		    trigger_data->duplex == DUPLEX_HALF)
 			blink_on = true;
@@ -144,7 +163,9 @@ static void set_baseline_state(struct led_netdev_data *trigger_data)
 		 * checking stats
 		 */
 		if (test_bit(TRIGGER_NETDEV_TX, &trigger_data->mode) ||
-		    test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode))
+		    test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode) ||
+		    test_bit(TRIGGER_NETDEV_TX_ERR, &trigger_data->mode) ||
+		    test_bit(TRIGGER_NETDEV_RX_ERR, &trigger_data->mode))
 			schedule_delayed_work(&trigger_data->work, 0);
 	}
 }
@@ -224,7 +245,7 @@ static void get_device_state(struct led_netdev_data *trigger_data)
 
 	trigger_data->carrier_link_up = netif_carrier_ok(trigger_data->net_dev);
 
-	if (__ethtool_get_link_ksettings(trigger_data->net_dev, &cmd))
+	if (netif_get_link_ksettings(trigger_data->net_dev, &cmd))
 		return;
 
 	if (trigger_data->carrier_link_up) {
@@ -255,31 +276,33 @@ static ssize_t device_name_show(struct device *dev,
 static int set_device_name(struct led_netdev_data *trigger_data,
 			   const char *name, size_t size)
 {
+	struct net_device *new_dev = NULL;
+	char device_name[IFNAMSIZ];
+
 	if (size >= IFNAMSIZ)
 		return -EINVAL;
 
 	cancel_delayed_work_sync(&trigger_data->work);
 
+	memcpy(device_name, name, size);
+	device_name[size] = 0;
+	if (size > 0 && device_name[size - 1] == '\n')
+		device_name[size - 1] = 0;
+
 	/*
-	 * Take RTNL lock before trigger_data lock to prevent potential
-	 * deadlock with netdev notifier registration.
+	 * Lock order: rtnl_lock -> netdev instance lock -> trigger_data lock.
 	 */
 	rtnl_lock();
+	if (device_name[0]) {
+		new_dev = dev_get_by_name(&init_net, device_name);
+		if (new_dev)
+			netdev_lock_ops(new_dev);
+	}
 	mutex_lock(&trigger_data->lock);
 
-	if (trigger_data->net_dev) {
-		dev_put(trigger_data->net_dev);
-		trigger_data->net_dev = NULL;
-	}
-
-	memcpy(trigger_data->device_name, name, size);
-	trigger_data->device_name[size] = 0;
-	if (size > 0 && trigger_data->device_name[size - 1] == '\n')
-		trigger_data->device_name[size - 1] = 0;
-
-	if (trigger_data->device_name[0] != 0)
-		trigger_data->net_dev =
-		    dev_get_by_name(&init_net, trigger_data->device_name);
+	dev_put(trigger_data->net_dev);
+	trigger_data->net_dev = new_dev;
+	strscpy(trigger_data->device_name, device_name);
 
 	trigger_data->carrier_link_up = false;
 	trigger_data->link_speed = SPEED_UNKNOWN;
@@ -294,6 +317,8 @@ static int set_device_name(struct led_netdev_data *trigger_data,
 		set_baseline_state(trigger_data);
 
 	mutex_unlock(&trigger_data->lock);
+	if (new_dev)
+		netdev_unlock_ops(new_dev);
 	rtnl_unlock();
 
 	return 0;
@@ -333,10 +358,16 @@ static ssize_t netdev_led_attr_show(struct device *dev, char *buf,
 	case TRIGGER_NETDEV_LINK_2500:
 	case TRIGGER_NETDEV_LINK_5000:
 	case TRIGGER_NETDEV_LINK_10000:
+	case TRIGGER_NETDEV_LINK_25000:
+	case TRIGGER_NETDEV_LINK_40000:
+	case TRIGGER_NETDEV_LINK_50000:
+	case TRIGGER_NETDEV_LINK_100000:
 	case TRIGGER_NETDEV_HALF_DUPLEX:
 	case TRIGGER_NETDEV_FULL_DUPLEX:
 	case TRIGGER_NETDEV_TX:
 	case TRIGGER_NETDEV_RX:
+	case TRIGGER_NETDEV_TX_ERR:
+	case TRIGGER_NETDEV_RX_ERR:
 		bit = attr;
 		break;
 	default:
@@ -367,10 +398,16 @@ static ssize_t netdev_led_attr_store(struct device *dev, const char *buf,
 	case TRIGGER_NETDEV_LINK_2500:
 	case TRIGGER_NETDEV_LINK_5000:
 	case TRIGGER_NETDEV_LINK_10000:
+	case TRIGGER_NETDEV_LINK_25000:
+	case TRIGGER_NETDEV_LINK_40000:
+	case TRIGGER_NETDEV_LINK_50000:
+	case TRIGGER_NETDEV_LINK_100000:
 	case TRIGGER_NETDEV_HALF_DUPLEX:
 	case TRIGGER_NETDEV_FULL_DUPLEX:
 	case TRIGGER_NETDEV_TX:
 	case TRIGGER_NETDEV_RX:
+	case TRIGGER_NETDEV_TX_ERR:
+	case TRIGGER_NETDEV_RX_ERR:
 		bit = attr;
 		break;
 	default:
@@ -388,7 +425,11 @@ static ssize_t netdev_led_attr_store(struct device *dev, const char *buf,
 	     test_bit(TRIGGER_NETDEV_LINK_1000, &mode) ||
 	     test_bit(TRIGGER_NETDEV_LINK_2500, &mode) ||
 	     test_bit(TRIGGER_NETDEV_LINK_5000, &mode) ||
-	     test_bit(TRIGGER_NETDEV_LINK_10000, &mode)))
+	     test_bit(TRIGGER_NETDEV_LINK_10000, &mode) ||
+	     test_bit(TRIGGER_NETDEV_LINK_25000, &mode) ||
+	     test_bit(TRIGGER_NETDEV_LINK_40000, &mode) ||
+	     test_bit(TRIGGER_NETDEV_LINK_50000, &mode) ||
+	     test_bit(TRIGGER_NETDEV_LINK_100000, &mode)))
 		return -EINVAL;
 
 	cancel_delayed_work_sync(&trigger_data->work);
@@ -425,10 +466,16 @@ DEFINE_NETDEV_TRIGGER(link_1000, TRIGGER_NETDEV_LINK_1000);
 DEFINE_NETDEV_TRIGGER(link_2500, TRIGGER_NETDEV_LINK_2500);
 DEFINE_NETDEV_TRIGGER(link_5000, TRIGGER_NETDEV_LINK_5000);
 DEFINE_NETDEV_TRIGGER(link_10000, TRIGGER_NETDEV_LINK_10000);
+DEFINE_NETDEV_TRIGGER(link_25000, TRIGGER_NETDEV_LINK_25000);
+DEFINE_NETDEV_TRIGGER(link_40000, TRIGGER_NETDEV_LINK_40000);
+DEFINE_NETDEV_TRIGGER(link_50000, TRIGGER_NETDEV_LINK_50000);
+DEFINE_NETDEV_TRIGGER(link_100000, TRIGGER_NETDEV_LINK_100000);
 DEFINE_NETDEV_TRIGGER(half_duplex, TRIGGER_NETDEV_HALF_DUPLEX);
 DEFINE_NETDEV_TRIGGER(full_duplex, TRIGGER_NETDEV_FULL_DUPLEX);
 DEFINE_NETDEV_TRIGGER(tx, TRIGGER_NETDEV_TX);
 DEFINE_NETDEV_TRIGGER(rx, TRIGGER_NETDEV_RX);
+DEFINE_NETDEV_TRIGGER(tx_err, TRIGGER_NETDEV_TX_ERR);
+DEFINE_NETDEV_TRIGGER(rx_err, TRIGGER_NETDEV_RX_ERR);
 
 static ssize_t interval_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
@@ -511,6 +558,10 @@ static umode_t netdev_trig_link_speed_visible(struct kobject *kobj,
 		CHECK_LINK_MODE_ATTR(2500);
 		CHECK_LINK_MODE_ATTR(5000);
 		CHECK_LINK_MODE_ATTR(10000);
+		CHECK_LINK_MODE_ATTR(25000);
+		CHECK_LINK_MODE_ATTR(40000);
+		CHECK_LINK_MODE_ATTR(50000);
+		CHECK_LINK_MODE_ATTR(100000);
 	}
 
 	return 0;
@@ -523,6 +574,10 @@ static struct attribute *netdev_trig_link_speed_attrs[] = {
 	&dev_attr_link_2500.attr,
 	&dev_attr_link_5000.attr,
 	&dev_attr_link_10000.attr,
+	&dev_attr_link_25000.attr,
+	&dev_attr_link_40000.attr,
+	&dev_attr_link_50000.attr,
+	&dev_attr_link_100000.attr,
 	NULL
 };
 
@@ -538,6 +593,8 @@ static struct attribute *netdev_trig_attrs[] = {
 	&dev_attr_half_duplex.attr,
 	&dev_attr_rx.attr,
 	&dev_attr_tx.attr,
+	&dev_attr_rx_err.attr,
+	&dev_attr_tx_err.attr,
 	&dev_attr_interval.attr,
 	&dev_attr_offloaded.attr,
 	NULL
@@ -593,6 +650,8 @@ static int netdev_trig_notify(struct notifier_block *nb,
 		trigger_data->net_dev = NULL;
 		break;
 	case NETDEV_UP:
+		trigger_data->hw_control = can_hw_control(trigger_data);
+		fallthrough;
 	case NETDEV_CHANGE:
 		get_device_state(trigger_data);
 		/* Refresh link_speed visibility */
@@ -628,7 +687,9 @@ static void netdev_trig_work(struct work_struct *work)
 
 	/* If we are not looking for RX/TX then return  */
 	if (!test_bit(TRIGGER_NETDEV_TX, &trigger_data->mode) &&
-	    !test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode))
+	    !test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode) &&
+	    !test_bit(TRIGGER_NETDEV_TX_ERR, &trigger_data->mode) &&
+	    !test_bit(TRIGGER_NETDEV_RX_ERR, &trigger_data->mode))
 		return;
 
 	dev_stats = dev_get_stats(trigger_data->net_dev, &temp);
@@ -636,7 +697,11 @@ static void netdev_trig_work(struct work_struct *work)
 	    (test_bit(TRIGGER_NETDEV_TX, &trigger_data->mode) ?
 		dev_stats->tx_packets : 0) +
 	    (test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode) ?
-		dev_stats->rx_packets : 0);
+		dev_stats->rx_packets : 0) +
+	    (test_bit(TRIGGER_NETDEV_TX_ERR, &trigger_data->mode) ?
+		dev_stats->tx_errors : 0) +
+	    (test_bit(TRIGGER_NETDEV_RX_ERR, &trigger_data->mode) ?
+		dev_stats->rx_errors : 0);
 
 	if (trigger_data->last_activity != new_activity) {
 		led_stop_software_blink(trigger_data->led_cdev);
@@ -648,6 +713,10 @@ static void netdev_trig_work(struct work_struct *work)
 			 test_bit(TRIGGER_NETDEV_LINK_2500, &trigger_data->mode) ||
 			 test_bit(TRIGGER_NETDEV_LINK_5000, &trigger_data->mode) ||
 			 test_bit(TRIGGER_NETDEV_LINK_10000, &trigger_data->mode) ||
+			 test_bit(TRIGGER_NETDEV_LINK_25000, &trigger_data->mode) ||
+			 test_bit(TRIGGER_NETDEV_LINK_40000, &trigger_data->mode) ||
+			 test_bit(TRIGGER_NETDEV_LINK_50000, &trigger_data->mode) ||
+			 test_bit(TRIGGER_NETDEV_LINK_100000, &trigger_data->mode) ||
 			 test_bit(TRIGGER_NETDEV_HALF_DUPLEX, &trigger_data->mode) ||
 			 test_bit(TRIGGER_NETDEV_FULL_DUPLEX, &trigger_data->mode);
 		interval = jiffies_to_msecs(
@@ -671,7 +740,7 @@ static int netdev_trig_activate(struct led_classdev *led_cdev)
 	struct device *dev;
 	int rc;
 
-	trigger_data = kzalloc(sizeof(struct led_netdev_data), GFP_KERNEL);
+	trigger_data = kzalloc_obj(struct led_netdev_data);
 	if (!trigger_data)
 		return -ENOMEM;
 

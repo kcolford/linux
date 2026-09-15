@@ -211,11 +211,9 @@ static const char * const snd_pcm_format_names[] = {
  */
 const char *snd_pcm_format_name(snd_pcm_format_t format)
 {
-	unsigned int format_num = (__force unsigned int)format;
-
-	if (format_num >= ARRAY_SIZE(snd_pcm_format_names) || !snd_pcm_format_names[format_num])
+	if (format >= ARRAY_SIZE(snd_pcm_format_names) || !snd_pcm_format_names[format])
 		return "Unknown";
-	return snd_pcm_format_names[format_num];
+	return snd_pcm_format_names[format];
 }
 EXPORT_SYMBOL_GPL(snd_pcm_format_name);
 
@@ -275,12 +273,12 @@ static const char *snd_pcm_stream_name(int stream)
 
 static const char *snd_pcm_access_name(snd_pcm_access_t access)
 {
-	return snd_pcm_access_names[(__force int)access];
+	return snd_pcm_access_names[access];
 }
 
 static const char *snd_pcm_subformat_name(snd_pcm_subformat_t subformat)
 {
-	return snd_pcm_subformat_names[(__force int)subformat];
+	return snd_pcm_subformat_names[subformat];
 }
 
 static const char *snd_pcm_tstamp_mode_name(int mode)
@@ -290,7 +288,7 @@ static const char *snd_pcm_tstamp_mode_name(int mode)
 
 static const char *snd_pcm_state_name(snd_pcm_state_t state)
 {
-	return snd_pcm_state_names[(__force int)state];
+	return snd_pcm_state_names[state];
 }
 
 #if IS_ENABLED(CONFIG_SND_PCM_OSS)
@@ -328,13 +326,13 @@ static const char *snd_pcm_oss_format_name(int format)
 static void snd_pcm_proc_info_read(struct snd_pcm_substream *substream,
 				   struct snd_info_buffer *buffer)
 {
-	struct snd_pcm_info *info __free(kfree) = NULL;
 	int err;
 
 	if (! substream)
 		return;
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	struct snd_pcm_info *info __free(kfree) =
+		kmalloc_obj(*info);
 	if (!info)
 		return;
 
@@ -462,6 +460,9 @@ static void snd_pcm_substream_proc_status_read(struct snd_info_entry *entry,
 	snd_iprintf(buffer, "-----\n");
 	snd_iprintf(buffer, "hw_ptr      : %ld\n", runtime->status->hw_ptr);
 	snd_iprintf(buffer, "appl_ptr    : %ld\n", runtime->control->appl_ptr);
+#ifdef CONFIG_SND_PCM_XRUN_DEBUG
+	snd_iprintf(buffer, "xrun_counter: %d\n", substream->xrun_counter);
+#endif
 }
 
 #ifdef CONFIG_SND_PCM_XRUN_DEBUG
@@ -589,7 +590,6 @@ static const struct attribute_group *pcm_dev_attr_groups[];
  * PM callbacks: we need to deal only with suspend here, as the resume is
  * triggered either from user-space or the driver's resume callback
  */
-#ifdef CONFIG_PM_SLEEP
 static int do_pcm_suspend(struct device *dev)
 {
 	struct snd_pcm_str *pstr = dev_get_drvdata(dev);
@@ -598,10 +598,9 @@ static int do_pcm_suspend(struct device *dev)
 		snd_pcm_suspend_all(pstr->pcm);
 	return 0;
 }
-#endif
 
 static const struct dev_pm_ops pcm_dev_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(do_pcm_suspend, NULL)
+	SYSTEM_SLEEP_PM_OPS(do_pcm_suspend, NULL)
 };
 
 /* device type for PCM -- basically only for passing PM callbacks */
@@ -656,7 +655,7 @@ int snd_pcm_new_stream(struct snd_pcm *pcm, int stream, int substream_count)
 	}
 	prev = NULL;
 	for (idx = 0, prev = NULL; idx < substream_count; idx++) {
-		substream = kzalloc(sizeof(*substream), GFP_KERNEL);
+		substream = kzalloc_obj(*substream);
 		if (!substream)
 			return -ENOMEM;
 		substream->pcm = pcm;
@@ -712,7 +711,7 @@ static int _snd_pcm_new(struct snd_card *card, const char *id, int device,
 		return -ENXIO;
 	if (rpcm)
 		*rpcm = NULL;
-	pcm = kzalloc(sizeof(*pcm), GFP_KERNEL);
+	pcm = kzalloc_obj(*pcm);
 	if (!pcm)
 		return -ENOMEM;
 	pcm->card = card;
@@ -934,7 +933,7 @@ int snd_pcm_attach_substream(struct snd_pcm *pcm, int stream,
 	if (substream == NULL)
 		return -EAGAIN;
 
-	runtime = kzalloc(sizeof(*runtime), GFP_KERNEL);
+	runtime = kzalloc_obj(*runtime);
 	if (runtime == NULL)
 		return -ENOMEM;
 
@@ -970,6 +969,9 @@ int snd_pcm_attach_substream(struct snd_pcm *pcm, int stream,
 	substream->pid = get_pid(task_pid(current));
 	pstr->substream_opened++;
 	*rsubstream = substream;
+#ifdef CONFIG_SND_PCM_XRUN_DEBUG
+	substream->xrun_counter = 0;
+#endif /* CONFIG_SND_PCM_XRUN_DEBUG */
 	return 0;
 }
 

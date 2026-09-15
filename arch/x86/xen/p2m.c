@@ -70,6 +70,7 @@
 #include <linux/memblock.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/acpi.h>
 
 #include <asm/cache.h>
 #include <asm/setup.h>
@@ -80,6 +81,7 @@
 #include <asm/xen/hypervisor.h>
 #include <xen/balloon.h>
 #include <xen/grant_table.h>
+#include <xen/hvc-console.h>
 
 #include "xen-ops.h"
 
@@ -176,13 +178,7 @@ static void p2m_init_identity(unsigned long *p2m, unsigned long pfn)
 static void * __ref alloc_p2m_page(void)
 {
 	if (unlikely(!slab_is_available())) {
-		void *ptr = memblock_alloc(PAGE_SIZE, PAGE_SIZE);
-
-		if (!ptr)
-			panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
-			      __func__, PAGE_SIZE, PAGE_SIZE);
-
-		return ptr;
+		return memblock_alloc_or_panic(PAGE_SIZE, PAGE_SIZE);
 	}
 
 	return (void *)__get_free_page(GFP_KERNEL);
@@ -690,7 +686,7 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
 	int i, ret = 0;
 	pte_t *pte;
 
-	if (xen_feature(XENFEAT_auto_translated_physmap))
+	if (!xen_pv_domain())
 		return 0;
 
 	if (kmap_ops) {
@@ -773,7 +769,7 @@ int clear_foreign_p2m_mapping(struct gnttab_unmap_grant_ref *unmap_ops,
 {
 	int i, ret = 0;
 
-	if (xen_feature(XENFEAT_auto_translated_physmap))
+	if (!xen_pv_domain())
 		return 0;
 
 	for (i = 0; i < count; i++) {
@@ -792,47 +788,98 @@ int clear_foreign_p2m_mapping(struct gnttab_unmap_grant_ref *unmap_ops,
 	return ret;
 }
 
-#ifdef CONFIG_XEN_DEBUG_FS
-#include <linux/debugfs.h>
-static int p2m_dump_show(struct seq_file *m, void *v)
+/* Remapped non-RAM areas */
+#define NR_NONRAM_REMAP 4
+static struct nonram_remap {
+	phys_addr_t maddr;
+	phys_addr_t paddr;
+	size_t size;
+} xen_nonram_remap[NR_NONRAM_REMAP] __ro_after_init;
+static unsigned int nr_nonram_remap __ro_after_init;
+
+/*
+ * Do the real remapping of non-RAM regions as specified in the
+ * xen_nonram_remap[] array.
+ * In case of an error just crash the system.
+ */
+void __init xen_do_remap_nonram(void)
 {
-	static const char * const type_name[] = {
-				[P2M_TYPE_IDENTITY] = "identity",
-				[P2M_TYPE_MISSING] = "missing",
-				[P2M_TYPE_PFN] = "pfn",
-				[P2M_TYPE_UNKNOWN] = "abnormal"};
-	unsigned long pfn, first_pfn;
-	int type, prev_type;
+	unsigned int i;
+	unsigned int remapped = 0;
+	const struct nonram_remap *remap = xen_nonram_remap;
+	unsigned long pfn, mfn, end_pfn;
 
-	prev_type = xen_p2m_elem_type(0);
-	first_pfn = 0;
+	for (i = 0; i < nr_nonram_remap; i++) {
+		end_pfn = PFN_UP(remap->paddr + remap->size);
+		pfn = PFN_DOWN(remap->paddr);
+		mfn = PFN_DOWN(remap->maddr);
+		while (pfn < end_pfn) {
+			if (!set_phys_to_machine(pfn, mfn))
+				panic("Failed to set p2m mapping for pfn=%lx mfn=%lx\n",
+				       pfn, mfn);
 
-	for (pfn = 0; pfn < xen_p2m_size; pfn++) {
-		type = xen_p2m_elem_type(pfn);
-		if (type != prev_type) {
-			seq_printf(m, " [0x%lx->0x%lx] %s\n", first_pfn, pfn,
-				   type_name[prev_type]);
-			prev_type = type;
-			first_pfn = pfn;
+			pfn++;
+			mfn++;
+			remapped++;
+		}
+
+		remap++;
+	}
+
+	pr_info("Remapped %u non-RAM page(s)\n", remapped);
+}
+
+#ifdef CONFIG_ACPI
+/*
+ * Xen variant of acpi_os_ioremap() taking potentially remapped non-RAM
+ * regions into account.
+ * Any attempt to map an area crossing a remap boundary will produce a
+ * WARN() splat.
+ * phys is related to remap->maddr on input and will be rebased to remap->paddr.
+ */
+static void __iomem *xen_acpi_os_ioremap(acpi_physical_address phys,
+					 acpi_size size)
+{
+	unsigned int i;
+	const struct nonram_remap *remap = xen_nonram_remap;
+
+	for (i = 0; i < nr_nonram_remap; i++) {
+		if (phys + size > remap->maddr &&
+		    phys < remap->maddr + remap->size) {
+			WARN_ON(phys < remap->maddr ||
+				phys + size > remap->maddr + remap->size);
+			phys += remap->paddr - remap->maddr;
+			break;
 		}
 	}
-	seq_printf(m, " [0x%lx->0x%lx] %s\n", first_pfn, pfn,
-		   type_name[prev_type]);
-	return 0;
+
+	return x86_acpi_os_ioremap(phys, size);
 }
+#endif /* CONFIG_ACPI */
 
-DEFINE_SHOW_ATTRIBUTE(p2m_dump);
-
-static struct dentry *d_mmu_debug;
-
-static int __init xen_p2m_debugfs(void)
+/*
+ * Add a new non-RAM remap entry.
+ * In case of no free entry found, just crash the system.
+ */
+void __init xen_add_remap_nonram(phys_addr_t maddr, phys_addr_t paddr,
+				 unsigned long size)
 {
-	struct dentry *d_xen = xen_init_debugfs();
+	BUG_ON((maddr & ~PAGE_MASK) != (paddr & ~PAGE_MASK));
 
-	d_mmu_debug = debugfs_create_dir("mmu", d_xen);
+	if (nr_nonram_remap == NR_NONRAM_REMAP) {
+		xen_raw_console_write("Number of required E820 entry remapping actions exceed maximum value\n");
+		BUG();
+	}
 
-	debugfs_create_file("p2m", 0600, d_mmu_debug, NULL, &p2m_dump_fops);
-	return 0;
+#ifdef CONFIG_ACPI
+	/* Switch to the Xen acpi_os_ioremap() variant. */
+	if (nr_nonram_remap == 0)
+		acpi_os_ioremap = xen_acpi_os_ioremap;
+#endif
+
+	xen_nonram_remap[nr_nonram_remap].maddr = maddr;
+	xen_nonram_remap[nr_nonram_remap].paddr = paddr;
+	xen_nonram_remap[nr_nonram_remap].size = size;
+
+	nr_nonram_remap++;
 }
-fs_initcall(xen_p2m_debugfs);
-#endif /* CONFIG_XEN_DEBUG_FS */

@@ -26,7 +26,6 @@
 #ifndef _DC_STATE_H_
 #define _DC_STATE_H_
 
-#include "dc.h"
 #include "inc/core_status.h"
 
 struct dc_state *dc_state_create(struct dc *dc, struct dc_state_create_params *params);
@@ -75,4 +74,11 @@ bool dc_state_add_all_planes_for_stream(
 struct dc_stream_status *dc_state_get_stream_status(
 	struct dc_state *state,
 	const struct dc_stream_state *stream);
+
+struct dc_state_status;
+struct dc_get_status_options;
+
+enum dc_status dc_state_get_status(struct dc_state_status *status,
+	const struct dc_get_status_options *options);
+
 #endif /* _DC_STATE_H_ */

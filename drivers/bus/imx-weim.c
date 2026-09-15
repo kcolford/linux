@@ -282,22 +282,18 @@ static int weim_probe(struct platform_device *pdev)
 	dev_set_drvdata(&pdev->dev, priv);
 
 	/* get the clock */
-	clk = devm_clk_get(&pdev->dev, NULL);
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
-
-	ret = clk_prepare_enable(clk);
-	if (ret)
-		return ret;
 
 	/* parse the device node */
 	ret = weim_parse_dt(pdev);
 	if (ret)
-		clk_disable_unprepare(clk);
-	else
-		dev_info(&pdev->dev, "Driver registered.\n");
+		return ret;
 
-	return ret;
+	dev_info(&pdev->dev, "Driver registered.\n");
+
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_OF_DYNAMIC)
@@ -331,12 +327,6 @@ static int of_weim_notify(struct notifier_block *nb, unsigned long action,
 				 "Failed to setup timing for '%pOF'\n", rd->dn);
 
 		if (!of_node_check_flag(rd->dn, OF_POPULATED)) {
-			/*
-			 * Clear the flag before adding the device so that
-			 * fw_devlink doesn't skip adding consumers to this
-			 * device.
-			 */
-			rd->dn->fwnode.flags &= ~FWNODE_FLAG_NOT_DEVICE;
 			if (!of_platform_device_create(rd->dn, NULL, &pdev->dev)) {
 				dev_err(&pdev->dev,
 					"Failed to create child device '%pOF'\n",

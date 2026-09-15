@@ -5,7 +5,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include <dt-bindings/clock/mediatek,mt8188-clk.h>
@@ -97,7 +96,7 @@ MODULE_DEVICE_TABLE(platform, clk_mt8188_vdo0_id_table);
 
 static struct platform_driver clk_mt8188_vdo0_drv = {
 	.probe = mtk_clk_pdev_probe,
-	.remove_new = mtk_clk_pdev_remove,
+	.remove = mtk_clk_pdev_remove,
 	.driver = {
 		.name = "clk-mt8188-vdo0",
 	},

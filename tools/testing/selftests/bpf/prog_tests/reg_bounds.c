@@ -422,38 +422,173 @@ static bool is_valid_range(enum num_t t, struct range x)
 	}
 }
 
-static struct range range_improve(enum num_t t, struct range old, struct range new)
+static struct range range_intersection(enum num_t t, struct range old, struct range new)
 {
 	return range(t, max_t(t, old.a, new.a), min_t(t, old.b, new.b));
+}
+
+/*
+ * Result is precise when 'x' and 'y' overlap or form a continuous range,
+ * result is an over-approximation if 'x' and 'y' do not overlap.
+ */
+static struct range range_union(enum num_t t, struct range x, struct range y)
+{
+	if (!is_valid_range(t, x))
+		return y;
+	if (!is_valid_range(t, y))
+		return x;
+	return range(t, min_t(t, x.a, y.a), max_t(t, x.b, y.b));
+}
+
+/*
+ * This function attempts to improve x range intersecting it with y.
+ * range_cast(... to_t ...) looses precision for ranges that pass to_t
+ * min/max boundaries. To avoid such precision loses this function
+ * splits both x and y into halves corresponding to non-overflowing
+ * sub-ranges: [0, smin] and [smax, -1].
+ * Final result is computed as follows:
+ *
+ *   ((x ∩ [0, smax]) ∩ (y ∩ [0, smax])) ∪
+ *   ((x ∩ [smin,-1]) ∩ (y ∩ [smin,-1]))
+ *
+ * Precision might still be lost if final union is not a continuous range.
+ */
+static struct range range_refine_in_halves(enum num_t x_t, struct range x,
+					   enum num_t y_t, struct range y)
+{
+	struct range x_pos, x_neg, y_pos, y_neg, r_pos, r_neg;
+	u64 smax, smin, neg_one;
+
+	if (t_is_32(x_t)) {
+		smax = (u64)(u32)S32_MAX;
+		smin = (u64)(u32)S32_MIN;
+		neg_one = (u64)(u32)(s32)(-1);
+	} else {
+		smax = (u64)S64_MAX;
+		smin = (u64)S64_MIN;
+		neg_one = U64_MAX;
+	}
+	x_pos = range_intersection(x_t, x, range(x_t, 0, smax));
+	x_neg = range_intersection(x_t, x, range(x_t, smin, neg_one));
+	y_pos = range_intersection(y_t, y, range(x_t, 0, smax));
+	y_neg = range_intersection(y_t, y, range(y_t, smin, neg_one));
+	r_pos = range_intersection(x_t, x_pos, range_cast(y_t, x_t, y_pos));
+	r_neg = range_intersection(x_t, x_neg, range_cast(y_t, x_t, y_neg));
+	return range_union(x_t, r_pos, r_neg);
+
+}
+
+static __always_inline u64 next_u32_block(u64 x) { return x + (1ULL << 32); }
+static __always_inline u64 prev_u32_block(u64 x) { return x - (1ULL << 32); }
+
+/* Is v within the circular u64 range [base, base + len]? */
+static __always_inline bool u64_range_contains(u64 v, u64 base, u64 len)
+{
+	return v - base <= len;
+}
+
+/* Is v within the circular u32 range [base, base + len]? */
+static __always_inline bool u32_range_contains(u32 v, u32 base, u32 len)
+{
+	return v - base <= len;
+}
+
+static bool range64_range32_intersect(enum num_t a_t,
+				      struct range a /* 64 */,
+				      struct range b /* 32 */,
+				      struct range *out /* 64 */)
+{
+	u64 b_len = (u32)(b.b - b.a);
+	u64 a_len = a.b - a.a;
+	u64 lo, hi;
+
+	if (u32_range_contains((u32)a.a, (u32)b.a, b_len)) {
+		lo = a.a;
+	} else {
+		lo = swap_low32(a.a, (u32)b.a);
+		if (!u64_range_contains(lo, a.a, a_len))
+			lo = next_u32_block(lo);
+		if (!u64_range_contains(lo, a.a, a_len))
+			return false;
+	}
+	if (u32_range_contains(a.b, (u32)b.a, b_len)) {
+		hi = a.b;
+	} else {
+		hi = swap_low32(a.b, (u32)b.b);
+		if (!u64_range_contains(hi, a.a, a_len))
+			hi = prev_u32_block(hi);
+		if (!u64_range_contains(hi, a.a, a_len))
+			return false;
+	}
+	*out = range(a_t, lo, hi);
+	return true;
 }
 
 static struct range range_refine(enum num_t x_t, struct range x, enum num_t y_t, struct range y)
 {
 	struct range y_cast;
 
+	if (t_is_32(x_t) == t_is_32(y_t))
+		x = range_refine_in_halves(x_t, x, y_t, y);
+
 	y_cast = range_cast(y_t, x_t, y);
 
-	/* the case when new range knowledge, *y*, is a 32-bit subregister
-	 * range, while previous range knowledge, *x*, is a full register
-	 * 64-bit range, needs special treatment to take into account upper 32
-	 * bits of full register range
+	/* If we know that
+	 *   - *x* is in the range of signed 32bit value, and
+	 *   - *y_cast* range is 32-bit signed non-negative
+	 * then *x* range can be improved with *y_cast* such that *x* range
+	 * is 32-bit signed non-negative. Otherwise, if the new range for *x*
+	 * allows upper 32-bit * 0xffffffff then the eventual new range for
+	 * *x* will be out of signed 32-bit range which violates the origin
+	 * *x* range.
 	 */
-	if (t_is_32(y_t) && !t_is_32(x_t)) {
-		struct range x_swap;
+	if (x_t == S64 && y_t == S32 && y_cast.a <= S32_MAX  && y_cast.b <= S32_MAX &&
+	    (s64)x.a >= S32_MIN && (s64)x.b <= S32_MAX)
+		return range_intersection(x_t, x, y_cast);
 
-		/* some combinations of upper 32 bits and sign bit can lead to
-		 * invalid ranges, in such cases it's easier to detect them
-		 * after cast/swap than try to enumerate all the conditions
-		 * under which transformation and knowledge transfer is valid
-		 */
-		x_swap = range(x_t, swap_low32(x.a, y_cast.a), swap_low32(x.b, y_cast.b));
-		if (!is_valid_range(x_t, x_swap))
-			return x;
-		return range_improve(x_t, x, x_swap);
+	if (y_t == U32 && x_t == U64) {
+		u64 xmin_swap, xmax_swap, xmin_lower32, xmax_lower32;
+
+		xmin_lower32 = x.a & 0xffffffff;
+		xmax_lower32 = x.b & 0xffffffff;
+		if (xmin_lower32 < y.a || xmin_lower32 > y.b) {
+			/* The 32 lower bits of the umin64 are outside the u32
+			 * range. Let's update umin64 to match the u32 range.
+			 * We want to *increase* the umin64 to the *minimum*
+			 * value that matches the u32 range.
+			 */
+			xmin_swap = swap_low32(x.a, y.a);
+			/* We should always only increase the minimum, so if
+			 * the new value is lower than before, we need to
+			 * increase the 32 upper bits by 1.
+			 */
+			if (xmin_swap < x.a)
+				xmin_swap += 0x100000000;
+			if (xmin_swap == x.b)
+				return range(x_t, x.b, x.b);
+		} else if (xmax_lower32 < y.a || xmax_lower32 > y.b) {
+			/* Same for the umax64, but we want to *decrease*
+			 * umax64 to the *maximum* value that matches the u32
+			 * range.
+			 */
+			xmax_swap = swap_low32(x.b, y.b);
+			if (xmax_swap > x.b)
+				xmax_swap -= 0x100000000;
+			if (xmax_swap == x.a)
+				return range(x_t, x.a, x.a);
+		}
+	}
+
+	if (t_is_32(y_t) && !t_is_32(x_t)) {
+		struct range x1;
+
+		if (range64_range32_intersect(x_t, x, y, &x1))
+			return x1;
+		return x;
 	}
 
 	/* otherwise, plain range cast and intersection works */
-	return range_improve(x_t, x, y_cast);
+	return range_intersection(x_t, x, y_cast);
 }
 
 /* =======================
@@ -490,7 +625,7 @@ static const char *op_str(enum op op)
 
 /* Can register with range [x.a, x.b] *EVER* satisfy
  * OP (<, <=, >, >=, ==, !=) relation to
- * a regsiter with range [y.a, y.b]
+ * a register with range [y.a, y.b]
  * _in *num_t* domain_
  */
 static bool range_canbe_op(enum num_t t, struct range x, struct range y, enum op op)
@@ -519,7 +654,7 @@ static bool range_canbe_op(enum num_t t, struct range x, struct range y, enum op
 
 /* Does register with range [x.a, x.b] *ALWAYS* satisfy
  * OP (<, <=, >, >=, ==, !=) relation to
- * a regsiter with range [y.a, y.b]
+ * a register with range [y.a, y.b]
  * _in *num_t* domain_
  */
 static bool range_always_op(enum num_t t, struct range x, struct range y, enum op op)
@@ -530,7 +665,7 @@ static bool range_always_op(enum num_t t, struct range x, struct range y, enum o
 
 /* Does register with range [x.a, x.b] *NEVER* satisfy
  * OP (<, <=, >, >=, ==, !=) relation to
- * a regsiter with range [y.a, y.b]
+ * a register with range [y.a, y.b]
  * _in *num_t* domain_
  */
 static bool range_never_op(enum num_t t, struct range x, struct range y, enum op op)
@@ -596,7 +731,7 @@ static void range_cond(enum num_t t, struct range x, struct range y,
 			*newx = range(t, x.a, x.b);
 			*newy = range(t, y.a + 1, y.b);
 		} else if (x.a == x.b && x.b == y.b) {
-			/* X is a constant matching rigth side of Y */
+			/* X is a constant matching right side of Y */
 			*newx = range(t, x.a, x.b);
 			*newy = range(t, y.a, y.b - 1);
 		} else if (y.a == y.b && x.a == y.a) {
@@ -604,7 +739,7 @@ static void range_cond(enum num_t t, struct range x, struct range y,
 			*newx = range(t, x.a + 1, x.b);
 			*newy = range(t, y.a, y.b);
 		} else if (y.a == y.b && x.b == y.b) {
-			/* Y is a constant matching rigth side of X */
+			/* Y is a constant matching right side of X */
 			*newx = range(t, x.a, x.b - 1);
 			*newy = range(t, y.a, y.b);
 		} else {
@@ -1005,11 +1140,11 @@ static int parse_reg_state(const char *s, struct reg_state *reg)
 	 *     - umin=%llu, if missing, assumed 0;
 	 *     - umax=%llu, if missing, assumed U64_MAX;
 	 *     - smin=%lld, if missing, assumed S64_MIN;
-	 *     - smax=%lld, if missing, assummed S64_MAX;
+	 *     - smax=%lld, if missing, assumed S64_MAX;
 	 *     - umin32=%d, if missing, assumed 0;
 	 *     - umax32=%d, if missing, assumed U32_MAX;
 	 *     - smin32=%d, if missing, assumed S32_MIN;
-	 *     - smax32=%d, if missing, assummed S32_MAX;
+	 *     - smax32=%d, if missing, assumed S32_MAX;
 	 *     - var_off=(%#llx; %#llx), tnum part, we don't care about it.
 	 *
 	 * If some of the values are equal, they will be grouped (but min/max
@@ -1150,7 +1285,23 @@ static int parse_range_cmp_log(const char *log_buf, struct case_spec spec,
 			spec.compare_subregs ? "w0" : "r0",
 			spec.compare_subregs ? "w" : "r", specs[i].reg_idx);
 
-		q = strstr(p, buf);
+		/*
+		 * In the verifier log look for lines:
+		 *   18: (bf) r0 = r6       ; R0=... R6=...
+		 * Different verifier passes may print
+		 *   18: (bf) r0 = r6
+		 * as well, but never followed by ';'.
+		 */
+		q = p;
+		while ((q = strstr(q, buf)) != NULL) {
+			const char *s = q + strlen(buf);
+
+			while (*s == ' ' || *s == '\t')
+				s++;
+			if (*s == ';')
+				break;
+			q = s;
+		}
 		if (!q) {
 			*specs[i].state = (struct reg_state){.valid = false};
 			continue;
@@ -1182,6 +1333,26 @@ static bool assert_range_eq(enum num_t t, struct range x, struct range y,
 	printf("%s\n", sb->buf);
 
 	return false;
+}
+
+/* For a pair of signed/unsigned t1/t2 checks if r1/r2 intersect in two intervals. */
+static bool needs_two_arcs(enum num_t t1, struct range r1,
+			   enum num_t t2, struct range r2)
+{
+	u64 lo = cast_t(t1, r2.a);
+	u64 hi = cast_t(t1, r2.b);
+
+	/* does r2 wrap in t1's domain: [0, hi] ∪ [lo, MAX]? */
+	return lo > hi && r1.a <= hi && r1.b >= lo;
+}
+
+static bool reg_state_needs_two_arcs(struct reg_state *s)
+{
+	if (!s->valid)
+		return false;
+
+	return needs_two_arcs(U64, s->r[U64], S64, s->r[S64]) ||
+	       needs_two_arcs(U32, s->r[U32], S32, s->r[S32]);
 }
 
 /* Validate that register states match, and print details if they don't */
@@ -1408,6 +1579,11 @@ static int verify_case_op(enum num_t init_t, enum num_t cond_t,
 	    !assert_reg_state_eq(&fr2, &fe2, "false_reg2") ||
 	    !assert_reg_state_eq(&tr1, &te1, "true_reg1") ||
 	    !assert_reg_state_eq(&tr2, &te2, "true_reg2")) {
+		if (reg_state_needs_two_arcs(&fe1) || reg_state_needs_two_arcs(&fe2) ||
+		    reg_state_needs_two_arcs(&te1) || reg_state_needs_two_arcs(&te2)) {
+			test__skip();
+			return 0;
+		}
 		failed = true;
 	}
 
@@ -1474,7 +1650,7 @@ static int verify_case_opt(struct ctx *ctx, enum num_t init_t, enum num_t cond_t
 			u64 elapsed_ns = get_time_ns() - ctx->start_ns;
 			double remain_ns = elapsed_ns / progress * (1 - progress);
 
-			fprintf(env.stderr, "PROGRESS (%s): %d/%d (%.2lf%%), "
+			fprintf(env.stderr_saved, "PROGRESS (%s): %d/%d (%.2lf%%), "
 					    "elapsed %llu mins (%.2lf hrs), "
 					    "ETA %.0lf mins (%.2lf hrs)\n",
 				ctx->progress_ctx,
@@ -1871,7 +2047,7 @@ cleanup:
  * envvar is not set, this test is skipped during test_progs testing.
  *
  * We split this up into smaller subsets based on initialization and
- * conditiona numeric domains to get an easy parallelization with test_progs'
+ * conditional numeric domains to get an easy parallelization with test_progs'
  * -j argument.
  */
 
@@ -1925,7 +2101,7 @@ static u64 rand_u64()
 {
 	/* RAND_MAX is guaranteed to be at least 1<<15, but in practice it
 	 * seems to be 1<<31, so we need to call it thrice to get full u64;
-	 * we'll use rougly equal split: 22 + 21 + 21 bits
+	 * we'll use roughly equal split: 22 + 21 + 21 bits
 	 */
 	return ((u64)random() << 42) |
 	       (((u64)random() & RAND_21BIT_MASK) << 21) |
@@ -2062,9 +2238,11 @@ static struct subtest_case crafted_cases[] = {
 	{U64, S64, {0x7fffffff00000001ULL, 0xffffffff00000000ULL}, {0, 0}},
 	{U64, S64, {0, 0xffffffffULL}, {1, 1}},
 	{U64, S64, {0, 0xffffffffULL}, {0x7fffffff, 0x7fffffff}},
+	{U64, S32, {0xfffffffe00000001, 0xffffffff00000000}, {S64_MIN, S64_MIN}},
+	{U64, U32, {0xfffffffe00000000, U64_MAX - 1}, {U64_MAX, U64_MAX}},
 
 	{U64, U32, {0, 0x100000000}, {0, 0}},
-	{U64, U32, {0xfffffffe, 0x100000000}, {0x80000000, 0x80000000}},
+	{U64, U32, {0xfffffffe, 0x300000000}, {0x80000000, 0x80000000}},
 
 	{U64, S32, {0, 0xffffffff00000000ULL}, {0, 0}},
 	/* these are tricky cases where lower 32 bits allow to tighten 64
@@ -2108,6 +2286,9 @@ static struct subtest_case crafted_cases[] = {
 	{S32, U32, {(u32)S32_MIN, 0}, {0, 0}},
 	{S32, U32, {(u32)S32_MIN, 0}, {(u32)S32_MIN, (u32)S32_MIN}},
 	{S32, U32, {(u32)S32_MIN, S32_MAX}, {S32_MAX, S32_MAX}},
+	{S64, U32, {0x0, 0x1f}, {0xffffffff80000000ULL, 0x000000007fffffffULL}},
+	{S64, U32, {0x0, 0x1f}, {0xffffffffffff8000ULL, 0x0000000000007fffULL}},
+	{S64, U32, {0x0, 0x1f}, {0xffffffffffffff80ULL, 0x000000000000007fULL}},
 };
 
 /* Go over crafted hard-coded cases. This is fast, so we do it as part of

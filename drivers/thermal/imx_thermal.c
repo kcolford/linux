@@ -353,24 +353,16 @@ static int imx_set_trip_temp(struct thermal_zone_device *tz,
 	return 0;
 }
 
-static int imx_bind(struct thermal_zone_device *tz,
-		    struct thermal_cooling_device *cdev)
+static bool imx_should_bind(struct thermal_zone_device *tz,
+			    const struct thermal_trip *trip,
+			    struct thermal_cooling_device *cdev,
+			    struct cooling_spec *c)
 {
-	return thermal_zone_bind_cooling_device(tz, IMX_TRIP_PASSIVE, cdev,
-						THERMAL_NO_LIMIT,
-						THERMAL_NO_LIMIT,
-						THERMAL_WEIGHT_DEFAULT);
+	return trip->type == THERMAL_TRIP_PASSIVE;
 }
 
-static int imx_unbind(struct thermal_zone_device *tz,
-		      struct thermal_cooling_device *cdev)
-{
-	return thermal_zone_unbind_cooling_device(tz, IMX_TRIP_PASSIVE, cdev);
-}
-
-static struct thermal_zone_device_ops imx_tz_ops = {
-	.bind = imx_bind,
-	.unbind = imx_unbind,
+static const struct thermal_zone_device_ops imx_tz_ops = {
+	.should_bind = imx_should_bind,
 	.get_temp = imx_get_temp,
 	.change_mode = imx_change_mode,
 	.set_trip_temp = imx_set_trip_temp,
@@ -701,8 +693,8 @@ static int imx_thermal_probe(struct platform_device *pdev)
 		goto clk_disable;
 	}
 
-	dev_info(dev, "%s CPU temperature grade - max:%dC"
-		 " critical:%dC passive:%dC\n", data->temp_grade,
+	dev_info(dev, "%s CPU temperature grade - max:%dC critical:%dC passive:%dC\n",
+			 data->temp_grade,
 		 data->temp_max / 1000, trips[IMX_TRIP_CRITICAL].temperature / 1000,
 		 trips[IMX_TRIP_PASSIVE].temperature / 1000);
 
@@ -740,10 +732,8 @@ static int imx_thermal_probe(struct platform_device *pdev)
 	ret = devm_request_threaded_irq(dev, data->irq,
 			imx_thermal_alarm_irq, imx_thermal_alarm_irq_thread,
 			0, "imx_thermal", data);
-	if (ret < 0) {
-		dev_err(dev, "failed to request alarm irq: %d\n", ret);
+	if (ret < 0)
 		goto thermal_zone_unregister;
-	}
 
 	pm_runtime_put(data->dev);
 
@@ -773,7 +763,7 @@ static void imx_thermal_remove(struct platform_device *pdev)
 	imx_thermal_unregister_legacy_cooling(data);
 }
 
-static int __maybe_unused imx_thermal_suspend(struct device *dev)
+static int imx_thermal_suspend(struct device *dev)
 {
 	struct imx_thermal_data *data = dev_get_drvdata(dev);
 	int ret;
@@ -792,7 +782,7 @@ static int __maybe_unused imx_thermal_suspend(struct device *dev)
 	return pm_runtime_force_suspend(data->dev);
 }
 
-static int __maybe_unused imx_thermal_resume(struct device *dev)
+static int imx_thermal_resume(struct device *dev)
 {
 	struct imx_thermal_data *data = dev_get_drvdata(dev);
 	int ret;
@@ -804,7 +794,7 @@ static int __maybe_unused imx_thermal_resume(struct device *dev)
 	return thermal_zone_device_enable(data->tz);
 }
 
-static int __maybe_unused imx_thermal_runtime_suspend(struct device *dev)
+static int imx_thermal_runtime_suspend(struct device *dev)
 {
 	struct imx_thermal_data *data = dev_get_drvdata(dev);
 	const struct thermal_soc_data *socdata = data->socdata;
@@ -826,7 +816,7 @@ static int __maybe_unused imx_thermal_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused imx_thermal_runtime_resume(struct device *dev)
+static int imx_thermal_runtime_resume(struct device *dev)
 {
 	struct imx_thermal_data *data = dev_get_drvdata(dev);
 	const struct thermal_soc_data *socdata = data->socdata;
@@ -840,12 +830,12 @@ static int __maybe_unused imx_thermal_runtime_resume(struct device *dev)
 	ret = regmap_write(map, socdata->sensor_ctrl + REG_CLR,
 			   socdata->power_down_mask);
 	if (ret)
-		return ret;
+		goto disable_clk;
 
 	ret = regmap_write(map, socdata->sensor_ctrl + REG_SET,
 			   socdata->measure_temp_mask);
 	if (ret)
-		return ret;
+		goto disable_clk;
 
 	/*
 	 * According to the temp sensor designers, it may require up to ~17us
@@ -854,22 +844,27 @@ static int __maybe_unused imx_thermal_runtime_resume(struct device *dev)
 	usleep_range(20, 50);
 
 	return 0;
+
+disable_clk:
+	clk_disable_unprepare(data->thermal_clk);
+
+	return ret;
 }
 
 static const struct dev_pm_ops imx_thermal_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(imx_thermal_suspend, imx_thermal_resume)
-	SET_RUNTIME_PM_OPS(imx_thermal_runtime_suspend,
-			   imx_thermal_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(imx_thermal_suspend, imx_thermal_resume)
+	RUNTIME_PM_OPS(imx_thermal_runtime_suspend,
+		       imx_thermal_runtime_resume, NULL)
 };
 
 static struct platform_driver imx_thermal = {
 	.driver = {
 		.name	= "imx_thermal",
-		.pm	= &imx_thermal_pm_ops,
+		.pm	= pm_ptr(&imx_thermal_pm_ops),
 		.of_match_table = of_imx_thermal_match,
 	},
 	.probe		= imx_thermal_probe,
-	.remove_new	= imx_thermal_remove,
+	.remove		= imx_thermal_remove,
 };
 module_platform_driver(imx_thermal);
 

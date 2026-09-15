@@ -2,7 +2,7 @@
 /*
  * NVEC: NVIDIA compliant embedded controller interface
  *
- * Copyright (C) 2011 The AC100 Kernel Team <ac100@lists.lauchpad.net>
+ * Copyright (C) 2011 The AC100 Kernel Team <ac100@lists.launchpad.net>
  *
  * Authors:  Pierre-Hugues Husson <phhusson@free.fr>
  *           Ilya Petrov <ilya.muromec@gmail.com>
@@ -57,7 +57,7 @@
  * @NVEC_MSG_RX: The message is an incoming message (from EC)
  * @NVEC_MSG_TX: The message is an outgoing message (to EC)
  */
-enum nvec_msg_category  {
+enum nvec_msg_category {
 	NVEC_MSG_RX,
 	NVEC_MSG_TX,
 };
@@ -175,7 +175,7 @@ static struct nvec_msg *nvec_msg_alloc(struct nvec_chip *nvec,
 		}
 	}
 
-	dev_err(nvec->dev, "could not allocate %s buffer\n",
+	dev_err(nvec->dev, "Could not allocate %s buffer\n",
 		(category == NVEC_MSG_TX) ? "TX" : "RX");
 
 	return NULL;
@@ -315,7 +315,7 @@ int nvec_write_sync(struct nvec_chip *nvec,
 	if (!(wait_for_completion_timeout(&nvec->sync_write,
 					  msecs_to_jiffies(2000)))) {
 		dev_warn(nvec->dev,
-			 "timeout waiting for sync write to complete\n");
+			 "Timeout waiting for sync write to complete\n");
 		mutex_unlock(&nvec->sync_write_mutex);
 		return -ETIMEDOUT;
 	}
@@ -392,7 +392,7 @@ static void nvec_request_master(struct work_struct *work)
 								msecs_to_jiffies(5000));
 
 		if (err == 0) {
-			dev_warn(nvec->dev, "timeout waiting for ec transfer\n");
+			dev_warn(nvec->dev, "Timeout waiting for ec transfer\n");
 			nvec_gpio_set_value(nvec, 1);
 			msg->pos = 0;
 		}
@@ -454,7 +454,7 @@ static void nvec_dispatch(struct work_struct *work)
 
 		if (nvec->sync_write_pending ==
 		      (msg->data[2] << 8) + msg->data[0]) {
-			dev_dbg(nvec->dev, "sync write completed!\n");
+			dev_dbg(nvec->dev, "Sync write completed!\n");
 			nvec->sync_write_pending = 0;
 			nvec->last_sync_msg = msg;
 			complete(&nvec->sync_write);
@@ -477,7 +477,7 @@ static void nvec_tx_completed(struct nvec_chip *nvec)
 {
 	/* We got an END_TRANS, let's skip this, maybe there's an event */
 	if (nvec->tx->pos != nvec->tx->size) {
-		dev_err(nvec->dev, "premature END_TRANS, resending\n");
+		dev_err(nvec->dev, "Premature END_TRANS, resending\n");
 		nvec->tx->pos = 0;
 		nvec_gpio_set_value(nvec, 0);
 	} else {
@@ -494,6 +494,8 @@ static void nvec_tx_completed(struct nvec_chip *nvec)
 static void nvec_rx_completed(struct nvec_chip *nvec)
 {
 	if (nvec->rx->pos != nvec_msg_size(nvec->rx)) {
+		unsigned char msg_type = nvec->rx->data[0];
+
 		dev_err(nvec->dev, "RX incomplete: Expected %u bytes, got %u\n",
 			(uint)nvec_msg_size(nvec->rx),
 			(uint)nvec->rx->pos);
@@ -502,7 +504,7 @@ static void nvec_rx_completed(struct nvec_chip *nvec)
 		nvec->state = 0;
 
 		/* Battery quirk - Often incomplete, and likes to crash */
-		if (nvec->rx->data[0] == NVEC_BAT)
+		if (msg_type == NVEC_BAT)
 			complete(&nvec->ec_transfer);
 
 		return;
@@ -608,7 +610,7 @@ static irqreturn_t nvec_interrupt(int irq, void *dev)
 
 	/* Filter out some errors */
 	if ((status & irq_mask) == 0 && (status & ~irq_mask) != 0) {
-		dev_err(nvec->dev, "unexpected irq mask %lx\n", status);
+		dev_err(nvec->dev, "Unexpected irq mask %lx\n", status);
 		return IRQ_HANDLED;
 	}
 	if ((status & I2C_SL_IRQ) == 0) {
@@ -631,7 +633,7 @@ static irqreturn_t nvec_interrupt(int irq, void *dev)
 		if (status != (I2C_SL_IRQ | RCVD))
 			nvec_invalid_flags(nvec, status, false);
 		break;
-	case 1:		/* command byte */
+	case 1:		/* Command byte */
 		if (status != I2C_SL_IRQ) {
 			nvec_invalid_flags(nvec, status, true);
 		} else {
@@ -648,7 +650,6 @@ static irqreturn_t nvec_interrupt(int irq, void *dev)
 		break;
 	case 2:		/* first byte after command */
 		if (status == (I2C_SL_IRQ | RNW | RCVD)) {
-			udelay(33);
 			if (nvec->rx->data[0] != 0x01) {
 				dev_err(nvec->dev,
 					"Read without prior read command\n");
@@ -660,6 +661,11 @@ static irqreturn_t nvec_interrupt(int irq, void *dev)
 			nvec_tx_set(nvec);
 			to_send = nvec->tx->data[0];
 			nvec->tx->pos = 1;
+			/*
+			 * delay ACK due to AP20 HW Bug
+			 * do not replace by usleep_range
+			 */
+			udelay(33);
 		} else if (status == (I2C_SL_IRQ)) {
 			nvec->rx->data[1] = received;
 			nvec->rx->pos = 2;
@@ -809,13 +815,12 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 
 	nvec->irq = platform_get_irq(pdev, 0);
 	if (nvec->irq < 0)
-		return -ENODEV;
+		return nvec->irq;
 
 	i2c_clk = devm_clk_get(dev, "div-clk");
-	if (IS_ERR(i2c_clk)) {
-		dev_err(dev, "failed to get controller clock\n");
-		return -ENODEV;
-	}
+	if (IS_ERR(i2c_clk))
+		return dev_err_probe(dev, PTR_ERR(i2c_clk),
+				     "failed to get controller clock\n");
 
 	nvec->rst = devm_reset_control_get_exclusive(dev, "i2c");
 	if (IS_ERR(nvec->rst)) {
@@ -845,13 +850,10 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 		return PTR_ERR(nvec->gpiod);
 	}
 
-	err = devm_request_irq(dev, nvec->irq, nvec_interrupt, 0,
+	err = devm_request_irq(dev, nvec->irq, nvec_interrupt, IRQF_NO_AUTOEN,
 			       "nvec", nvec);
-	if (err) {
-		dev_err(dev, "couldn't request irq\n");
-		return -ENODEV;
-	}
-	disable_irq(nvec->irq);
+	if (err)
+		return dev_err_probe(dev, err, "couldn't request irq\n");
 
 	tegra_init_i2c_slave(nvec);
 
@@ -904,8 +906,8 @@ static void tegra_nvec_remove(struct platform_device *pdev)
 	nvec_unregister_notifier(nvec, &nvec->nvec_status_notifier);
 	cancel_work_sync(&nvec->rx_work);
 	cancel_work_sync(&nvec->tx_work);
-	/* FIXME: needs check whether nvec is responsible for power off */
-	pm_power_off = NULL;
+	if (pm_power_off == nvec_power_off)
+		pm_power_off = NULL;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -953,7 +955,7 @@ MODULE_DEVICE_TABLE(of, nvidia_nvec_of_match);
 
 static struct platform_driver nvec_device_driver = {
 	.probe   = tegra_nvec_probe,
-	.remove_new = tegra_nvec_remove,
+	.remove = tegra_nvec_remove,
 	.driver  = {
 		.name = "nvec",
 		.pm = &nvec_pm_ops,

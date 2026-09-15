@@ -8,7 +8,6 @@
  */
 
 #include <linux/slab.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
@@ -116,7 +115,7 @@ static int mc13xxx_spi_write(void *context, const void *data, size_t count)
  * single transfer.
  */
 
-static struct regmap_bus regmap_mc13xxx_bus = {
+static const struct regmap_bus regmap_mc13xxx_bus = {
 	.write = mc13xxx_spi_write,
 	.read = mc13xxx_spi_read,
 };

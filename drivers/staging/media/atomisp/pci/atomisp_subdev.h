@@ -3,17 +3,6 @@
  * Support for Medifield PNW Camera Imaging ISP subsystem.
  *
  * Copyright (c) 2010 Intel Corporation. All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- *
  */
 #ifndef __ATOMISP_SUBDEV_H__
 #define __ATOMISP_SUBDEV_H__
@@ -67,9 +56,6 @@ struct atomisp_video_pipe {
 
 	/* Filled through atomisp_get_css_frame_info() on queue setup */
 	struct ia_css_frame_info frame_info;
-
-	/* Set from streamoff to disallow queuing further buffers in CSS */
-	bool stopping;
 
 	/*
 	 * irq_lock is used to protect video buffer state change operations and
@@ -329,20 +315,20 @@ bool atomisp_subdev_format_conversion(struct atomisp_sub_device *asd);
 /* Get pointer to appropriate format */
 struct v4l2_mbus_framefmt
 *atomisp_subdev_get_ffmt(struct v4l2_subdev *sd,
-			 struct v4l2_subdev_state *sd_state, uint32_t which,
-			 uint32_t pad);
+			 struct v4l2_subdev_state *sd_state, u32 which,
+			 u32 pad);
 struct v4l2_rect *atomisp_subdev_get_rect(struct v4l2_subdev *sd,
 	struct v4l2_subdev_state *sd_state,
-	u32 which, uint32_t pad,
-	uint32_t target);
+	u32 which, u32 pad,
+	u32 target);
 int atomisp_subdev_set_selection(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_state *sd_state,
-				 u32 which, uint32_t pad, uint32_t target,
+				 u32 which, u32 pad, u32 target,
 				 u32 flags, struct v4l2_rect *r);
 /* Actually set the format */
 void atomisp_subdev_set_ffmt(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_state *sd_state,
-			     uint32_t which,
+			     u32 which,
 			     u32 pad, struct v4l2_mbus_framefmt *ffmt);
 
 void atomisp_subdev_cleanup_pending_events(struct atomisp_sub_device *asd);

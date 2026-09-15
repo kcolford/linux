@@ -49,6 +49,7 @@ struct rmi_function {
 
 bool rmi_is_function_device(struct device *dev);
 
+struct rmi_function *rmi_alloc_function(struct rmi_device *rmi_dev, u8 id);
 int __must_check rmi_register_function(struct rmi_function *);
 void rmi_unregister_function(struct rmi_function *);
 
@@ -87,7 +88,7 @@ struct rmi_function_handler {
 };
 
 #define to_rmi_function_handler(d) \
-		container_of(d, struct rmi_function_handler, driver)
+		container_of_const(d, struct rmi_function_handler, driver)
 
 int __must_check __rmi_register_function_handler(struct rmi_function_handler *,
 						 struct module *, const char *);

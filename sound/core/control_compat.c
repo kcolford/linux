@@ -79,10 +79,11 @@ struct snd_ctl_elem_info32 {
 static int snd_ctl_elem_info_compat(struct snd_ctl_file *ctl,
 				    struct snd_ctl_elem_info32 __user *data32)
 {
-	struct snd_ctl_elem_info *data __free(kfree) = NULL;
+	struct snd_card *card = ctl->card;
 	int err;
+	struct snd_ctl_elem_info *data __free(kfree) =
+		kzalloc_obj(*data);
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (! data)
 		return -ENOMEM;
 
@@ -95,7 +96,11 @@ static int snd_ctl_elem_info_compat(struct snd_ctl_file *ctl,
 	if (get_user(data->value.enumerated.item, &data32->value.enumerated.item))
 		return -EFAULT;
 
+	err = snd_power_ref_and_wait(card);
+	if (err < 0)
+		return err;
 	err = snd_ctl_elem_info(ctl, data);
+	snd_power_unref(card);
 	if (err < 0)
 		return err;
 	/* restore info to 32bit */
@@ -164,21 +169,19 @@ static int get_ctl_type(struct snd_card *card, struct snd_ctl_elem_id *id,
 			int *countp)
 {
 	struct snd_kcontrol *kctl;
-	struct snd_ctl_elem_info *info __free(kfree) = NULL;
 	int err;
 
 	guard(rwsem_read)(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, id);
+	kctl = snd_ctl_find_id(card, id);
 	if (!kctl)
 		return -ENOENT;
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+
+	struct snd_ctl_elem_info *info __free(kfree) =
+		kzalloc_obj(*info);
 	if (info == NULL)
 		return -ENOMEM;
 	info->id = *id;
-	err = snd_power_ref_and_wait(card);
-	if (!err)
-		err = kctl->info(kctl, info);
-	snd_power_unref(card);
+	err = kctl->info(kctl, info);
 	if (err >= 0) {
 		err = info->type;
 		*countp = info->count;
@@ -223,8 +226,8 @@ static int copy_ctl_value_from_user(struct snd_card *card,
 	if (type < 0)
 		return type;
 
-	if (type == (__force int)SNDRV_CTL_ELEM_TYPE_BOOLEAN ||
-	    type == (__force int)SNDRV_CTL_ELEM_TYPE_INTEGER) {
+	if (type == SNDRV_CTL_ELEM_TYPE_BOOLEAN ||
+	    type == SNDRV_CTL_ELEM_TYPE_INTEGER) {
 		for (i = 0; i < count; i++) {
 			s32 __user *intp = valuep;
 			int val;
@@ -233,7 +236,7 @@ static int copy_ctl_value_from_user(struct snd_card *card,
 			data->value.integer.value[i] = val;
 		}
 	} else {
-		size = get_elem_size((__force snd_ctl_elem_type_t)type, count);
+		size = get_elem_size(type, count);
 		if (size < 0) {
 			dev_err(card->dev, "snd_ioctl32_ctl_elem_value: unknown type %d\n", type);
 			return -EINVAL;
@@ -256,8 +259,8 @@ static int copy_ctl_value_to_user(void __user *userdata,
 	struct snd_ctl_elem_value32 __user *data32 = userdata;
 	int i, size;
 
-	if (type == (__force int)SNDRV_CTL_ELEM_TYPE_BOOLEAN ||
-	    type == (__force int)SNDRV_CTL_ELEM_TYPE_INTEGER) {
+	if (type == SNDRV_CTL_ELEM_TYPE_BOOLEAN ||
+	    type == SNDRV_CTL_ELEM_TYPE_INTEGER) {
 		for (i = 0; i < count; i++) {
 			s32 __user *intp = valuep;
 			int val;
@@ -266,7 +269,7 @@ static int copy_ctl_value_to_user(void __user *userdata,
 				return -EFAULT;
 		}
 	} else {
-		size = get_elem_size((__force snd_ctl_elem_type_t)type, count);
+		size = get_elem_size(type, count);
 		if (copy_to_user(valuep, data->value.bytes.data, size))
 			return -EFAULT;
 	}
@@ -275,13 +278,13 @@ static int copy_ctl_value_to_user(void __user *userdata,
 	return 0;
 }
 
-static int ctl_elem_read_user(struct snd_card *card,
-			      void __user *userdata, void __user *valuep)
+static int __ctl_elem_read_user(struct snd_card *card,
+				void __user *userdata, void __user *valuep)
 {
-	struct snd_ctl_elem_value *data __free(kfree) = NULL;
 	int err, type, count;
+	struct snd_ctl_elem_value *data __free(kfree) =
+		kzalloc_obj(*data);
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -296,14 +299,27 @@ static int ctl_elem_read_user(struct snd_card *card,
 	return copy_ctl_value_to_user(userdata, valuep, data, type, count);
 }
 
-static int ctl_elem_write_user(struct snd_ctl_file *file,
-			       void __user *userdata, void __user *valuep)
+static int ctl_elem_read_user(struct snd_card *card,
+			      void __user *userdata, void __user *valuep)
 {
-	struct snd_ctl_elem_value *data __free(kfree) = NULL;
+	int err;
+
+	err = snd_power_ref_and_wait(card);
+	if (err < 0)
+		return err;
+	err = __ctl_elem_read_user(card, userdata, valuep);
+	snd_power_unref(card);
+	return err;
+}
+
+static int __ctl_elem_write_user(struct snd_ctl_file *file,
+				 void __user *userdata, void __user *valuep)
+{
 	struct snd_card *card = file->card;
 	int err, type, count;
+	struct snd_ctl_elem_value *data __free(kfree) =
+		kzalloc_obj(*data);
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -316,6 +332,20 @@ static int ctl_elem_write_user(struct snd_ctl_file *file,
 	if (err < 0)
 		return err;
 	return copy_ctl_value_to_user(userdata, valuep, data, type, count);
+}
+
+static int ctl_elem_write_user(struct snd_ctl_file *file,
+			       void __user *userdata, void __user *valuep)
+{
+	struct snd_card *card = file->card;
+	int err;
+
+	err = snd_power_ref_and_wait(card);
+	if (err < 0)
+		return err;
+	err = __ctl_elem_write_user(file, userdata, valuep);
+	snd_power_unref(card);
+	return err;
 }
 
 static int snd_ctl_elem_read_user_compat(struct snd_card *card,
@@ -349,9 +379,9 @@ static int snd_ctl_elem_add_compat(struct snd_ctl_file *file,
 				   struct snd_ctl_elem_info32 __user *data32,
 				   int replace)
 {
-	struct snd_ctl_elem_info *data __free(kfree) = NULL;
+	struct snd_ctl_elem_info *data __free(kfree) =
+		kzalloc_obj(*data);
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (! data)
 		return -ENOMEM;
 
@@ -387,7 +417,7 @@ static int snd_ctl_elem_add_compat(struct snd_ctl_file *file,
 		break;
 	}
 	return snd_ctl_elem_add(file, data, replace);
-}  
+}
 
 enum {
 	SNDRV_CTL_IOCTL_ELEM_LIST32 = _IOWR('U', 0x10, struct snd_ctl_elem_list32),
@@ -416,6 +446,7 @@ static inline long snd_ctl_ioctl_compat(struct file *file, unsigned int cmd, uns
 	switch (cmd) {
 	case SNDRV_CTL_IOCTL_PVERSION:
 	case SNDRV_CTL_IOCTL_CARD_INFO:
+	case SNDRV_CTL_IOCTL_CARD_BYTES:
 	case SNDRV_CTL_IOCTL_SUBSCRIBE_EVENTS:
 	case SNDRV_CTL_IOCTL_POWER:
 	case SNDRV_CTL_IOCTL_POWER_STATE:

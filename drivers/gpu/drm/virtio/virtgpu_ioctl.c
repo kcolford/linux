@@ -80,9 +80,9 @@ static int virtio_gpu_map_ioctl(struct drm_device *dev, void *data,
 	struct virtio_gpu_device *vgdev = dev->dev_private;
 	struct drm_virtgpu_map *virtio_gpu_map = data;
 
-	return virtio_gpu_mode_dumb_mmap(file, vgdev->ddev,
-					 virtio_gpu_map->handle,
-					 &virtio_gpu_map->offset);
+	return drm_gem_dumb_map_offset(file, vgdev->ddev,
+				       virtio_gpu_map->handle,
+				       &virtio_gpu_map->offset);
 }
 
 static int virtio_gpu_getparam_ioctl(struct drm_device *dev, void *data,
@@ -116,6 +116,11 @@ static int virtio_gpu_getparam_ioctl(struct drm_device *dev, void *data,
 		break;
 	case VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME:
 		value = vgdev->has_context_init ? 1 : 0;
+		break;
+	case VIRTGPU_PARAM_BLOB_ALIGNMENT:
+		if (!vgdev->has_blob_alignment)
+			return -ENOENT;
+		value = vgdev->blob_alignment;
 		break;
 	default:
 		return -EINVAL;
@@ -489,6 +494,12 @@ static int verify_blob(struct virtio_gpu_device *vgdev,
 	params->size = rc_blob->size;
 	params->blob = true;
 	params->blob_flags = rc_blob->blob_flags;
+	params->blob_hints = rc_blob->blob_hints;
+
+	if (vgdev->has_blob_alignment &&
+	    !IS_ALIGNED(params->size, vgdev->blob_alignment))
+		return -EINVAL;
+
 	return 0;
 }
 

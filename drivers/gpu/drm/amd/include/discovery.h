@@ -64,6 +64,19 @@ typedef struct binary_header
 	table_info table_list[TOTAL_TABLES];
 } binary_header;
 
+typedef struct binary_header_v2
+{
+	/* psp structure should go at the top of this structure */
+	uint32_t binary_signature; /* 0x7, 0x14, 0x21, 0x28 */
+	uint16_t version_major;     /* 0x02 */
+	uint16_t version_minor;
+	uint16_t binary_checksum;  /* Byte sum of the binary after this field */
+	uint16_t binary_size;      /* Binary Size*/
+	uint16_t num_tables;
+	uint16_t padding;
+	table_info table_list[] __counted_by(num_tables);
+} binary_header_v2;
+
 typedef struct die_info
 {
 	uint16_t die_id;
@@ -256,6 +269,48 @@ struct gc_info_v1_2 {
 	uint32_t gc_gl1c_per_sa;
 	uint32_t gc_gl1c_size_per_instance;
 	uint32_t gc_gl2c_per_gpu;
+};
+
+struct gc_info_v1_3 {
+    struct gpu_info_header header;
+    uint32_t gc_num_se;
+    uint32_t gc_num_wgp0_per_sa;
+    uint32_t gc_num_wgp1_per_sa;
+    uint32_t gc_num_rb_per_se;
+    uint32_t gc_num_gl2c;
+    uint32_t gc_num_gprs;
+    uint32_t gc_num_max_gs_thds;
+    uint32_t gc_gs_table_depth;
+    uint32_t gc_gsprim_buff_depth;
+    uint32_t gc_parameter_cache_depth;
+    uint32_t gc_double_offchip_lds_buffer;
+    uint32_t gc_wave_size;
+    uint32_t gc_max_waves_per_simd;
+    uint32_t gc_max_scratch_slots_per_cu;
+    uint32_t gc_lds_size;
+    uint32_t gc_num_sc_per_se;
+    uint32_t gc_num_sa_per_se;
+    uint32_t gc_num_packer_per_sc;
+    uint32_t gc_num_gl2a;
+    uint32_t gc_num_tcp_per_sa;
+    uint32_t gc_num_sdp_interface;
+    uint32_t gc_num_tcps;
+    uint32_t gc_num_tcp_per_wpg;
+    uint32_t gc_tcp_l1_size;
+    uint32_t gc_num_sqc_per_wgp;
+    uint32_t gc_l1_instruction_cache_size_per_sqc;
+    uint32_t gc_l1_data_cache_size_per_sqc;
+    uint32_t gc_gl1c_per_sa;
+    uint32_t gc_gl1c_size_per_instance;
+    uint32_t gc_gl2c_per_gpu;
+    uint32_t gc_tcp_size_per_cu;
+    uint32_t gc_tcp_cache_line_size;
+    uint32_t gc_instruction_cache_size_per_sqc;
+    uint32_t gc_instruction_cache_line_size;
+    uint32_t gc_scalar_data_cache_size_per_sqc;
+    uint32_t gc_scalar_data_cache_line_size;
+    uint32_t gc_tcc_size;
+    uint32_t gc_tcc_cache_line_size;
 };
 
 struct gc_info_v2_0 {

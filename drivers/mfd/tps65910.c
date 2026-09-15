@@ -21,6 +21,9 @@
 #include <linux/of.h>
 #include <linux/property.h>
 
+/* Dummy I2C transfer length for SWCZ010 workaround */
+#define TPS65910_DUMMY_XFER_LEN 1
+
 static const struct resource rtc_resources[] = {
 	{
 		.start  = TPS65910_IRQ_RTC_ALARM,
@@ -197,7 +200,7 @@ static const struct regmap_irq tps65910_irqs[] = {
 	},
 };
 
-static struct regmap_irq_chip tps65911_irq_chip = {
+static const struct regmap_irq_chip tps65911_irq_chip = {
 	.name = "tps65910",
 	.irqs = tps65911_irqs,
 	.num_irqs = ARRAY_SIZE(tps65911_irqs),
@@ -208,7 +211,7 @@ static struct regmap_irq_chip tps65911_irq_chip = {
 	.ack_base = TPS65910_INT_STS,
 };
 
-static struct regmap_irq_chip tps65910_irq_chip = {
+static const struct regmap_irq_chip tps65910_irq_chip = {
 	.name = "tps65910",
 	.irqs = tps65910_irqs,
 	.num_irqs = ARRAY_SIZE(tps65910_irqs),
@@ -223,7 +226,7 @@ static int tps65910_irq_init(struct tps65910 *tps65910, int irq,
 		    struct tps65910_platform_data *pdata)
 {
 	int ret;
-	static struct regmap_irq_chip *tps6591x_irqs_chip;
+	static const struct regmap_irq_chip *tps6591x_irqs_chip;
 
 	if (!irq) {
 		dev_warn(tps65910->dev, "No interrupt support, no core IRQ\n");
@@ -472,7 +475,18 @@ static int tps65910_i2c_probe(struct i2c_client *i2c)
 	 * first I2C transfer. So issue a dummy transfer before the first
 	 * real transfer.
 	 */
-	i2c_master_send(i2c, "", 1);
+	ret = i2c_master_send(i2c, "", TPS65910_DUMMY_XFER_LEN);
+	if (ret != TPS65910_DUMMY_XFER_LEN) {
+		int err;
+
+		if (ret < 0)
+			err = ret;
+		else
+			err = -EIO;
+
+		return dev_err_probe(&i2c->dev, err, "dummy transfer failed\n");
+	}
+
 	tps65910->regmap = devm_regmap_init_i2c(i2c, &tps65910_regmap_config);
 	if (IS_ERR(tps65910->regmap)) {
 		ret = PTR_ERR(tps65910->regmap);

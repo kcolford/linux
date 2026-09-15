@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -72,7 +72,7 @@ xchk_parent_actor(
 	if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, 0, &error))
 		return error;
 
-	if (sc->ip->i_ino == ino)
+	if (I_INO(sc->ip) == ino)
 		spc->nlink++;
 
 	if (xchk_should_terminate(spc->sc, &error))
@@ -119,6 +119,7 @@ xchk_parent_validate(
 		.nlink		= 0,
 	};
 	struct xfs_mount	*mp = sc->mp;
+	xfs_ino_t		ino = I_INO(sc->ip);
 	struct xfs_inode	*dp = NULL;
 	xfs_nlink_t		expected_nlink;
 	unsigned int		lock_mode;
@@ -126,14 +127,20 @@ xchk_parent_validate(
 
 	/* Is this the root dir?  Then '..' must point to itself. */
 	if (sc->ip == mp->m_rootip) {
-		if (sc->ip->i_ino != mp->m_sb.sb_rootino ||
-		    sc->ip->i_ino != parent_ino)
+		if (ino != mp->m_sb.sb_rootino || ino != parent_ino)
+			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
+		return 0;
+	}
+
+	/* Is this the metadata root dir?  Then '..' must point to itself. */
+	if (sc->ip == mp->m_metadirip) {
+		if (ino != mp->m_sb.sb_metadirino || ino != parent_ino)
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 		return 0;
 	}
 
 	/* '..' must not point to ourselves. */
-	if (sc->ip->i_ino == parent_ino) {
+	if (ino == parent_ino) {
 		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 		return 0;
 	}
@@ -182,6 +189,12 @@ xchk_parent_validate(
 	if (xchk_dir_looks_zapped(dp)) {
 		error = -EBUSY;
 		xchk_set_incomplete(sc);
+		goto out_unlock;
+	}
+
+	/* Metadata and regular inodes cannot cross trees. */
+	if (xfs_is_metadir_inode(dp) != xfs_is_metadir_inode(sc->ip)) {
+		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 		goto out_unlock;
 	}
 
@@ -300,8 +313,8 @@ xchk_parent_pptr_and_dotdot(
 	}
 
 	/* Is this the root dir?  Then '..' must point to itself. */
-	if (sc->ip == sc->mp->m_rootip) {
-		if (sc->ip->i_ino != pp->parent_ino)
+	if (xchk_inode_is_dirtree_root(sc->ip)) {
+		if (I_INO(sc->ip) != pp->parent_ino)
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 		return 0;
 	}
@@ -384,7 +397,7 @@ xchk_parent_dirent(
 		return error;
 
 	/* Does the inode number match? */
-	if (child_ino != sc->ip->i_ino) {
+	if (child_ino != I_INO(sc->ip)) {
 		xchk_fblock_xref_set_corrupt(sc, XFS_ATTR_FORK, 0);
 		return 0;
 	}
@@ -472,11 +485,11 @@ xchk_parent_scan_attr(
 			valuelen, &parent_ino, NULL);
 	if (error) {
 		xchk_fblock_set_corrupt(sc, XFS_ATTR_FORK, 0);
-		return error;
+		return -ECANCELED;
 	}
 
 	/* No self-referential parent pointers. */
-	if (parent_ino == sc->ip->i_ino) {
+	if (parent_ino == I_INO(sc->ip)) {
 		xchk_fblock_set_corrupt(sc, XFS_ATTR_FORK, 0);
 		return -ECANCELED;
 	}
@@ -498,7 +511,7 @@ xchk_parent_scan_attr(
 		};
 
 		/* Couldn't lock the inode, so save the pptr for later. */
-		trace_xchk_parent_defer(sc->ip, &xname, dp->i_ino);
+		trace_xchk_parent_defer(sc->ip, &xname, I_INO(dp));
 
 		error = xfblob_storename(pp->pptr_names, &save_pp.name_cookie,
 				&xname);
@@ -585,7 +598,7 @@ xchk_parent_slow_pptr(
 	 */
 	lockmode = xchk_parent_lock_dir(sc, dp);
 	if (lockmode) {
-		trace_xchk_parent_slowpath(sc->ip, xname, dp->i_ino);
+		trace_xchk_parent_slowpath(sc->ip, xname, I_INO(dp));
 		goto check_dirent;
 	}
 
@@ -596,7 +609,7 @@ xchk_parent_slow_pptr(
 	xchk_iunlock(sc, sc->ilock_flags);
 	pp->need_revalidate = true;
 
-	trace_xchk_parent_ultraslowpath(sc->ip, xname, dp->i_ino);
+	trace_xchk_parent_ultraslowpath(sc->ip, xname, I_INO(dp));
 
 	error = xchk_dir_trylock_for_pptrs(sc, dp, &lockmode);
 	if (error)
@@ -711,17 +724,25 @@ xchk_parent_count_pptrs(
 	}
 
 	if (S_ISDIR(VFS_I(sc->ip)->i_mode)) {
-		if (sc->ip == sc->mp->m_rootip)
+		if (xchk_inode_is_dirtree_root(sc->ip))
 			pp->pptrs_found++;
 
 		if (VFS_I(sc->ip)->i_nlink == 0 && pp->pptrs_found > 0)
-			xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+			xchk_ip_set_corrupt(sc, sc->ip);
 		else if (VFS_I(sc->ip)->i_nlink > 0 &&
 			 pp->pptrs_found == 0)
-			xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+			xchk_ip_set_corrupt(sc, sc->ip);
 	} else {
+		/*
+		 * Starting with metadir, we allow checking of parent pointers
+		 * of non-directory files that are children of the superblock.
+		 * Pretend that we found a parent pointer attr.
+		 */
+		if (xfs_has_metadir(sc->mp) && xchk_inode_is_sb_rooted(sc->ip))
+			pp->pptrs_found++;
+
 		if (VFS_I(sc->ip)->i_nlink != pp->pptrs_found)
-			xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+			xchk_ip_set_corrupt(sc, sc->ip);
 	}
 
 	return 0;
@@ -733,10 +754,9 @@ xchk_parent_pptr(
 	struct xfs_scrub	*sc)
 {
 	struct xchk_pptrs	*pp;
-	char			*descr;
 	int			error;
 
-	pp = kvzalloc(sizeof(struct xchk_pptrs), XCHK_GFP_FLAGS);
+	pp = kvzalloc_obj(struct xchk_pptrs, XCHK_GFP_FLAGS);
 	if (!pp)
 		return -ENOMEM;
 	pp->sc = sc;
@@ -746,16 +766,12 @@ xchk_parent_pptr(
 	 * Set up some staging memory for parent pointers that we can't check
 	 * due to locking contention.
 	 */
-	descr = xchk_xfile_ino_descr(sc, "slow parent pointer entries");
-	error = xfarray_create(descr, 0, sizeof(struct xchk_pptr),
-			&pp->pptr_entries);
-	kfree(descr);
+	error = xfarray_create("slow parent pointer entries", 0,
+			sizeof(struct xchk_pptr), &pp->pptr_entries);
 	if (error)
 		goto out_pp;
 
-	descr = xchk_xfile_ino_descr(sc, "slow parent pointer names");
-	error = xfblob_create(descr, &pp->pptr_names);
-	kfree(descr);
+	error = xfblob_create("slow parent pointer names", &pp->pptr_names);
 	if (error)
 		goto out_entries;
 
@@ -799,7 +815,7 @@ xchk_parent_pptr(
 	}
 
 	if (pp->sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT)
-		goto out_pp;
+		goto out_names;
 
 	/*
 	 * Complain if the number of parent pointers doesn't match the link
@@ -839,7 +855,7 @@ xchk_parent(
 		return -ENOENT;
 
 	/* We're not a special inode, are we? */
-	if (!xfs_verify_dir_ino(mp, sc->ip->i_ino)) {
+	if (!xfs_verify_dir_ino(mp, I_INO(sc->ip))) {
 		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 		return 0;
 	}
@@ -885,16 +901,15 @@ bool
 xchk_pptr_looks_zapped(
 	struct xfs_inode	*ip)
 {
-	struct xfs_mount	*mp = ip->i_mount;
 	struct inode		*inode = VFS_I(ip);
 
-	ASSERT(xfs_has_parent(mp));
+	ASSERT(xfs_has_parent(ip->i_mount));
 
 	/*
 	 * Temporary files that cannot be linked into the directory tree do not
 	 * have attr forks because they cannot ever have parents.
 	 */
-	if (inode->i_nlink == 0 && !(inode->i_state & I_LINKABLE))
+	if (inode->i_nlink == 0 && !(inode_state_read_once(inode) & I_LINKABLE))
 		return false;
 
 	/*
@@ -902,15 +917,15 @@ xchk_pptr_looks_zapped(
 	 * of a parent pointer scan is always the empty set.  It's safe to scan
 	 * them even if the attr fork was zapped.
 	 */
-	if (ip == mp->m_rootip)
+	if (xchk_inode_is_dirtree_root(ip))
 		return false;
 
 	/*
-	 * Metadata inodes are all rooted in the superblock and do not have
-	 * any parents.  Hence the attr fork will not be initialized, but
-	 * there are no parent pointers that might have been zapped.
+	 * Metadata inodes that are rooted in the superblock do not have any
+	 * parents.  Hence the attr fork will not be initialized, but there are
+	 * no parent pointers that might have been zapped.
 	 */
-	if (xfs_is_metadata_inode(ip))
+	if (xchk_inode_is_sb_rooted(ip))
 		return false;
 
 	/*

@@ -39,7 +39,7 @@ static const struct of_device_id ens160_spi_of_match[] = {
 MODULE_DEVICE_TABLE(of, ens160_spi_of_match);
 
 static const struct spi_device_id ens160_spi_id[] = {
-	{ "ens160" },
+	{ .name = "ens160" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ens160_spi_id);
@@ -58,4 +58,4 @@ module_spi_driver(ens160_spi_driver);
 MODULE_AUTHOR("Gustavo Silva <gustavograzs@gmail.com>");
 MODULE_DESCRIPTION("ScioSense ENS160 SPI driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ENS160);
+MODULE_IMPORT_NS("IIO_ENS160");

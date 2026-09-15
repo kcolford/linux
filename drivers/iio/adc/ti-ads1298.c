@@ -23,7 +23,7 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/kfifo_buf.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Commands */
 #define ADS1298_CMD_WAKEUP	0x02
@@ -66,7 +66,7 @@
 #define ADS1298_MASK_CONFIG3_VREF_4V		BIT(5)
 
 #define ADS1298_REG_LOFF	0x04
-#define ADS1298_REG_CHnSET(n)	(0x05 + n)
+#define ADS1298_REG_CHnSET(n)	(0x05 + (n))
 #define ADS1298_MASK_CH_PD		BIT(7)
 #define ADS1298_MASK_CH_PGA		GENMASK(6, 4)
 #define ADS1298_MASK_CH_MUX		GENMASK(2, 0)
@@ -210,9 +210,11 @@ static int ads1298_read_one(struct ads1298_private *priv, int chan_index)
 		return ret;
 	}
 
-	/* Cannot take longer than 40ms (250Hz) */
-	ret = wait_for_completion_timeout(&priv->completion, msecs_to_jiffies(50));
-	if (!ret)
+	/*
+	 * One conversion takes at most 4ms at the lowest sample rate (250Hz).
+	 * Use 50ms to allow for kernel scheduling latency.
+	 */
+	if (!wait_for_completion_timeout(&priv->completion, msecs_to_jiffies(50)))
 		return -ETIMEDOUT;
 
 	return 0;
@@ -279,6 +281,7 @@ static const u8 ads1298_pga_settings[] = { 6, 1, 2, 3, 4, 8, 12 };
 static int ads1298_get_scale(struct ads1298_private *priv,
 			     int channel, int *val, int *val2)
 {
+	unsigned int pga_idx;
 	int ret;
 	unsigned int regval;
 	u8 gain;
@@ -294,7 +297,7 @@ static int ads1298_get_scale(struct ads1298_private *priv,
 		if (ret)
 			return ret;
 
-		/* Refererence in millivolts */
+		/* Reference in millivolts */
 		*val = regval & ADS1298_MASK_CONFIG3_VREF_4V ? 4000 : 2400;
 	}
 
@@ -302,7 +305,11 @@ static int ads1298_get_scale(struct ads1298_private *priv,
 	if (ret)
 		return ret;
 
-	gain = ads1298_pga_settings[FIELD_GET(ADS1298_MASK_CH_PGA, regval)];
+	pga_idx = FIELD_GET(ADS1298_MASK_CH_PGA, regval);
+	if (pga_idx >= ARRAY_SIZE(ads1298_pga_settings))
+		return -EINVAL;
+
+	gain = ads1298_pga_settings[pga_idx];
 	*val /= gain; /* Full scale is VREF / gain */
 
 	*val2 = ADS1298_BITS_PER_SAMPLE - 1; /* Signed, hence the -1 */
@@ -319,13 +326,12 @@ static int ads1298_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		ret = ads1298_read_one(priv, chan->scan_index);
 
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 
 		if (ret)
 			return ret;
@@ -502,8 +508,7 @@ static void ads1298_rdata_complete(void *context)
 	}
 
 	/* Demux the channel data into our bounce buffer */
-	for_each_set_bit(scan_index, indio_dev->active_scan_mask,
-			 indio_dev->masklength) {
+	iio_for_each_active_channel(indio_dev, scan_index) {
 		const struct iio_chan_spec *scan_chan =
 					&indio_dev->channels[scan_index];
 		const u8 *data = priv->rx_buffer + scan_chan->address;
@@ -614,15 +619,8 @@ static int ads1298_init(struct iio_dev *indio_dev)
 	}
 	indio_dev->name = devm_kasprintf(dev, GFP_KERNEL, "ads129%u%s",
 					 indio_dev->num_channels, suffix);
-
-	/* Enable internal test signal, double amplitude, double frequency */
-	ret = regmap_write(priv->regmap, ADS1298_REG_CONFIG2,
-			   ADS1298_MASK_CONFIG2_RESERVED |
-			   ADS1298_MASK_CONFIG2_INT_TEST |
-			   ADS1298_MASK_CONFIG2_TEST_AMP |
-			   ADS1298_MASK_CONFIG2_TEST_FREQ_FAST);
-	if (ret)
-		return ret;
+	if (!indio_dev->name)
+		return -ENOMEM;
 
 	val = ADS1298_MASK_CONFIG3_RESERVED; /* Must write 1 always */
 	if (!priv->reg_vref) {
@@ -745,7 +743,7 @@ static int ads1298_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ads1298_id[] = {
-	{ "ads1298" },
+	{ .name = "ads1298" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ads1298_id);

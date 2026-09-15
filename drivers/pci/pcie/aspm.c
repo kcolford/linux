@@ -15,6 +15,7 @@
 #include <linux/math.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/of.h>
 #include <linux/pci.h>
 #include <linux/pci_regs.h>
 #include <linux/errno.h>
@@ -81,24 +82,44 @@ void pci_configure_aspm_l1ss(struct pci_dev *pdev)
 
 void pci_save_aspm_l1ss_state(struct pci_dev *pdev)
 {
+	struct pci_dev *parent = pdev->bus->self;
 	struct pci_cap_saved_state *save_state;
-	u16 l1ss = pdev->l1ss;
 	u32 *cap;
+
+	/*
+	 * If this is a Downstream Port, we never restore the L1SS state
+	 * directly; we only restore it when we restore the state of the
+	 * Upstream Port below it.
+	 */
+	if (pcie_downstream_port(pdev) || !parent)
+		return;
+
+	if (!pdev->l1ss || !parent->l1ss)
+		return;
 
 	/*
 	 * Save L1 substate configuration. The ASPM L0s/L1 configuration
 	 * in PCI_EXP_LNKCTL_ASPMC is saved by pci_save_pcie_state().
 	 */
-	if (!l1ss)
-		return;
-
 	save_state = pci_find_saved_ext_cap(pdev, PCI_EXT_CAP_ID_L1SS);
 	if (!save_state)
 		return;
 
 	cap = &save_state->cap.data[0];
-	pci_read_config_dword(pdev, l1ss + PCI_L1SS_CTL2, cap++);
-	pci_read_config_dword(pdev, l1ss + PCI_L1SS_CTL1, cap++);
+	pci_read_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL2, cap++);
+	pci_read_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1, cap++);
+
+	/*
+	 * Save parent's L1 substate configuration so we have it for
+	 * pci_restore_aspm_l1ss_state(pdev) to restore.
+	 */
+	save_state = pci_find_saved_ext_cap(parent, PCI_EXT_CAP_ID_L1SS);
+	if (!save_state)
+		return;
+
+	cap = &save_state->cap.data[0];
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, cap++);
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, cap++);
 }
 
 void pci_restore_aspm_l1ss_state(struct pci_dev *pdev)
@@ -215,7 +236,8 @@ struct pcie_link_state {
 	u32 aspm_support:7;		/* Supported ASPM state */
 	u32 aspm_enabled:7;		/* Enabled ASPM state */
 	u32 aspm_capable:7;		/* Capable ASPM state with latency */
-	u32 aspm_default:7;		/* Default ASPM state by BIOS */
+	u32 aspm_default:7;		/* Default ASPM state by BIOS or
+					   override */
 	u32 aspm_disable:7;		/* Disabled ASPM state */
 
 	/* Clock PM state */
@@ -225,7 +247,7 @@ struct pcie_link_state {
 	u32 clkpm_disable:1;		/* Clock PM disabled */
 };
 
-static int aspm_disabled, aspm_force;
+static bool aspm_disabled, aspm_force;
 static bool aspm_support_enabled = true;
 static DEFINE_MUTEX(aspm_lock);
 static LIST_HEAD(link_list);
@@ -503,6 +525,46 @@ static u32 calc_l12_pwron(struct pci_dev *pdev, u32 scale, u32 val)
 	return 0;
 }
 
+/**
+ * pcie_encode_t_power_on - Encode T_POWER_ON into scale and value fields
+ * @t_power_on_us: T_POWER_ON time in microseconds
+ * @scale: Encoded T_POWER_ON Scale (0..2)
+ * @value: Encoded T_POWER_ON Value
+ *
+ * T_POWER_ON is encoded as:
+ *   T_POWER_ON(us) = scale_unit(us) * value
+ *
+ * where scale_unit is selected by @scale:
+ *   0: 2us
+ *   1: 10us
+ *   2: 100us
+ *
+ * If @t_power_on_us exceeds the maximum representable value, the result
+ * is clamped to the largest encodable T_POWER_ON.
+ *
+ * See PCIe r7.0, sec 7.8.3.2.
+ */
+void pcie_encode_t_power_on(u32 t_power_on_us, u8 *scale, u8 *value)
+{
+	u8 maxv = FIELD_MAX(PCI_L1SS_CAP_P_PWR_ON_VALUE);
+
+	/* T_POWER_ON_Value ("value") is a 5-bit field with max value of 31. */
+	if (t_power_on_us <= 2 * maxv) {
+		*scale = 0; /* Value times 2us */
+		*value = DIV_ROUND_UP(t_power_on_us, 2);
+	} else if (t_power_on_us <= 10 * maxv) {
+		*scale = 1; /* Value times 10us */
+		*value = DIV_ROUND_UP(t_power_on_us, 10);
+	} else if (t_power_on_us <= 100 * maxv) {
+		*scale = 2; /* value times 100us */
+		*value = DIV_ROUND_UP(t_power_on_us, 100);
+	} else {
+		*scale = 2;
+		*value = maxv;
+	}
+}
+EXPORT_SYMBOL(pcie_encode_t_power_on);
+
 /*
  * Encode an LTR_L1.2_THRESHOLD value for the L1 PM Substates Control 1
  * register.  Ports enter L1.2 when the most recent LTR value is greater
@@ -684,22 +746,29 @@ static void aspm_calc_l12_info(struct pcie_link_state *link,
 	}
 
 	/* Program T_POWER_ON times in both ports */
-	pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, ctl2);
-	pci_write_config_dword(child, child->l1ss + PCI_L1SS_CTL2, ctl2);
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2,
+				       PCI_L1SS_CTL2_T_PWR_ON_VALUE |
+				       PCI_L1SS_CTL2_T_PWR_ON_SCALE, ctl2);
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL2,
+				       PCI_L1SS_CTL2_T_PWR_ON_VALUE |
+				       PCI_L1SS_CTL2_T_PWR_ON_SCALE, ctl2);
 
 	/* Program Common_Mode_Restore_Time in upstream device */
 	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_CM_RESTORE_TIME, ctl1);
+				       PCI_L1SS_CTL1_CM_RESTORE_TIME,
+				       ctl1 & PCI_L1SS_CTL1_CM_RESTORE_TIME);
 
 	/* Program LTR_L1.2_THRESHOLD time in both ports */
 	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
 				       PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
 				       PCI_L1SS_CTL1_LTR_L12_TH_SCALE,
-				       ctl1);
+				       ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
+					       PCI_L1SS_CTL1_LTR_L12_TH_SCALE));
 	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
 				       PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
 				       PCI_L1SS_CTL1_LTR_L12_TH_SCALE,
-				       ctl1);
+				       ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
+					       PCI_L1SS_CTL1_LTR_L12_TH_SCALE));
 
 	if (pl1_2_enables || cl1_2_enables) {
 		pci_clear_and_set_config_dword(parent,
@@ -768,10 +837,104 @@ static void aspm_l1ss_init(struct pcie_link_state *link)
 		aspm_calc_l12_info(link, parent_l1ss_cap, child_l1ss_cap);
 }
 
+#define FLAG(x, y, d)	(((x) & (PCIE_LINK_STATE_##y)) ? d : "")
+
+/* Configure the ASPM L1 substates. Caller must disable L1 first. */
+static void pcie_config_aspm_l1ss(struct pcie_link_state *link, u32 state)
+{
+	u32 val = 0;
+	struct pci_dev *child = link->downstream, *parent = link->pdev;
+
+	if (state & PCIE_LINK_STATE_L1_1)
+		val |= PCI_L1SS_CTL1_ASPM_L1_1;
+	if (state & PCIE_LINK_STATE_L1_2)
+		val |= PCI_L1SS_CTL1_ASPM_L1_2;
+	if (state & PCIE_LINK_STATE_L1_1_PCIPM)
+		val |= PCI_L1SS_CTL1_PCIPM_L1_1;
+	if (state & PCIE_LINK_STATE_L1_2_PCIPM)
+		val |= PCI_L1SS_CTL1_PCIPM_L1_2;
+
+	/*
+	 * PCIe r6.2, sec 5.5.4, rules for enabling L1 PM Substates:
+	 * - Clear L1.x enable bits at child first, then at parent
+	 * - Set L1.x enable bits at parent first, then at child
+	 * - ASPM/PCIPM L1.2 must be disabled while programming timing
+	 *   parameters
+	 */
+
+	/* Disable all L1 substates */
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
+				       PCI_L1SS_CTL1_L1SS_MASK, 0);
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
+				       PCI_L1SS_CTL1_L1SS_MASK, 0);
+
+	/* Enable what we need to enable */
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
+				       PCI_L1SS_CTL1_L1SS_MASK, val);
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
+				       PCI_L1SS_CTL1_L1SS_MASK, val);
+}
+
+static bool pcie_link_has_aspm_override(const struct pcie_link_state *link,
+					const char *aspm)
+{
+	return (device_property_present(&link->pdev->dev, aspm) ||
+		device_property_present(&link->downstream->dev, aspm));
+}
+
+static void pcie_aspm_override_default_link_state(struct pcie_link_state *link)
+{
+	struct pci_dev *pdev = link->downstream;
+	u32 override;
+
+	/* For devicetree platforms, enable L0s and L1 by default */
+	if (of_have_populated_dt()) {
+		bool no_l0s = pcie_link_has_aspm_override(link, "aspm-no-l0s");
+		bool no_l1 = pcie_link_has_aspm_override(link, "aspm-no-l1");
+		bool no_l1ss = pcie_link_has_aspm_override(link, "aspm-no-l1ss");
+
+		if (no_l0s) {
+			link->aspm_support &= ~PCIE_LINK_STATE_L0S;
+			link->aspm_default &= ~PCIE_LINK_STATE_L0S;
+			link->aspm_enabled &= ~PCIE_LINK_STATE_L0S;
+		}
+
+		/*
+		 * Clear L1SS in hardware before updating aspm_support. Once
+		 * aspm_capable is derived from aspm_support, pcie_config_aspm_link()
+		 * skips pcie_config_aspm_l1ss() entirely via the aspm_capable guard,
+		 * leaving firmware-enabled L1SS substates active in hardware.
+		 * This applies equally when disabling L1 (which implies L1SS).
+		 */
+		if ((no_l1 || no_l1ss) && (link->aspm_enabled & PCIE_LINK_STATE_L1SS))
+			pcie_config_aspm_l1ss(link, 0);
+
+		if (no_l1) {
+			link->aspm_support &= ~(PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_L1SS);
+			link->aspm_default &= ~(PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_L1SS);
+			link->aspm_enabled &= ~(PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_L1SS);
+		} else if (no_l1ss) {
+			link->aspm_support &= ~PCIE_LINK_STATE_L1SS;
+			link->aspm_default &= ~PCIE_LINK_STATE_L1SS;
+			link->aspm_enabled &= ~PCIE_LINK_STATE_L1SS;
+		}
+
+		if (link->aspm_support & PCIE_LINK_STATE_L0S)
+			link->aspm_default |= PCIE_LINK_STATE_L0S;
+		if (link->aspm_support & PCIE_LINK_STATE_L1)
+			link->aspm_default |= PCIE_LINK_STATE_L1;
+		override = link->aspm_default & ~link->aspm_enabled;
+		if (override)
+			pci_info(pdev, "ASPM: default states%s%s\n",
+				 FLAG(override, L0S, " L0s"),
+				 FLAG(override, L1, " L1"));
+	}
+}
+
 static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 {
 	struct pci_dev *child = link->downstream, *parent = link->pdev;
-	u32 parent_lnkcap, child_lnkcap;
+	struct pci_dev *fn;
 	u16 parent_lnkctl, child_lnkctl;
 	struct pci_bus *linkbus = parent->subordinate;
 
@@ -786,9 +949,8 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 	 * If ASPM not supported, don't mess with the clocks and link,
 	 * bail out now.
 	 */
-	pcie_capability_read_dword(parent, PCI_EXP_LNKCAP, &parent_lnkcap);
-	pcie_capability_read_dword(child, PCI_EXP_LNKCAP, &child_lnkcap);
-	if (!(parent_lnkcap & child_lnkcap & PCI_EXP_LNKCAP_ASPMS))
+	if (!(parent->aspm_l0s_support && child->aspm_l0s_support) &&
+	    !(parent->aspm_l1_support && child->aspm_l1_support))
 		return;
 
 	/* Configure common clock before checking latencies */
@@ -800,10 +962,18 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 	 * read-only Link Capabilities may change depending on common clock
 	 * configuration (PCIe r5.0, sec 7.5.3.6).
 	 */
-	pcie_capability_read_dword(parent, PCI_EXP_LNKCAP, &parent_lnkcap);
-	pcie_capability_read_dword(child, PCI_EXP_LNKCAP, &child_lnkcap);
 	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &parent_lnkctl);
 	pcie_capability_read_word(child, PCI_EXP_LNKCTL, &child_lnkctl);
+
+	/* Disable L0s/L1 before updating L1SS config */
+	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, child_lnkctl) ||
+	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, parent_lnkctl)) {
+		list_for_each_entry(fn, &linkbus->devices, bus_list)
+			pcie_capability_clear_and_set_word(fn, PCI_EXP_LNKCTL,
+						PCI_EXP_LNKCTL_ASPMC, 0);
+		pcie_capability_clear_and_set_word(parent, PCI_EXP_LNKCTL,
+						PCI_EXP_LNKCTL_ASPMC, 0);
+	}
 
 	/*
 	 * Setup L0s state
@@ -812,7 +982,7 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 	 * given link unless components on both sides of the link each
 	 * support L0s.
 	 */
-	if (parent_lnkcap & child_lnkcap & PCI_EXP_LNKCAP_ASPM_L0S)
+	if (parent->aspm_l0s_support && child->aspm_l0s_support)
 		link->aspm_support |= PCIE_LINK_STATE_L0S;
 
 	if (child_lnkctl & PCI_EXP_LNKCTL_ASPM_L0S)
@@ -821,7 +991,7 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 		link->aspm_enabled |= PCIE_LINK_STATE_L0S_DW;
 
 	/* Setup L1 state */
-	if (parent_lnkcap & child_lnkcap & PCI_EXP_LNKCAP_ASPM_L1)
+	if (parent->aspm_l1_support && child->aspm_l1_support)
 		link->aspm_support |= PCIE_LINK_STATE_L1;
 
 	if (parent_lnkctl & child_lnkctl & PCI_EXP_LNKCTL_ASPM_L1)
@@ -831,6 +1001,31 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 
 	/* Save default state */
 	link->aspm_default = link->aspm_enabled;
+
+	pcie_aspm_override_default_link_state(link);
+
+	/*
+	 * Restore L0s/L1 if they were enabled, but don't restore any
+	 * state a Devicetree override just disabled in aspm_support above.
+	 */
+	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, child_lnkctl) ||
+	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, parent_lnkctl)) {
+		if (!(link->aspm_support & PCIE_LINK_STATE_L0S)) {
+			child_lnkctl &= ~PCI_EXP_LNKCTL_ASPM_L0S;
+			parent_lnkctl &= ~PCI_EXP_LNKCTL_ASPM_L0S;
+		}
+		if (!(link->aspm_support & PCIE_LINK_STATE_L1)) {
+			child_lnkctl &= ~PCI_EXP_LNKCTL_ASPM_L1;
+			parent_lnkctl &= ~PCI_EXP_LNKCTL_ASPM_L1;
+		}
+		pcie_capability_clear_and_set_word(parent, PCI_EXP_LNKCTL,
+					PCI_EXP_LNKCTL_ASPMC,
+					parent_lnkctl & PCI_EXP_LNKCTL_ASPMC);
+		list_for_each_entry(fn, &linkbus->devices, bus_list)
+			pcie_capability_clear_and_set_word(fn, PCI_EXP_LNKCTL,
+					PCI_EXP_LNKCTL_ASPMC,
+					child_lnkctl & PCI_EXP_LNKCTL_ASPMC);
+	}
 
 	/* Setup initial capable state. Will be updated later */
 	link->aspm_capable = link->aspm_support;
@@ -843,60 +1038,6 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 
 		pcie_aspm_check_latency(child);
 	}
-}
-
-/* Configure the ASPM L1 substates */
-static void pcie_config_aspm_l1ss(struct pcie_link_state *link, u32 state)
-{
-	u32 val, enable_req;
-	struct pci_dev *child = link->downstream, *parent = link->pdev;
-
-	enable_req = (link->aspm_enabled ^ state) & state;
-
-	/*
-	 * Here are the rules specified in the PCIe spec for enabling L1SS:
-	 * - When enabling L1.x, enable bit at parent first, then at child
-	 * - When disabling L1.x, disable bit at child first, then at parent
-	 * - When enabling ASPM L1.x, need to disable L1
-	 *   (at child followed by parent).
-	 * - The ASPM/PCIPM L1.2 must be disabled while programming timing
-	 *   parameters
-	 *
-	 * To keep it simple, disable all L1SS bits first, and later enable
-	 * what is needed.
-	 */
-
-	/* Disable all L1 substates */
-	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, 0);
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, 0);
-	/*
-	 * If needed, disable L1, and it gets enabled later
-	 * in pcie_config_aspm_link().
-	 */
-	if (enable_req & (PCIE_LINK_STATE_L1_1 | PCIE_LINK_STATE_L1_2)) {
-		pcie_capability_clear_word(child, PCI_EXP_LNKCTL,
-					   PCI_EXP_LNKCTL_ASPM_L1);
-		pcie_capability_clear_word(parent, PCI_EXP_LNKCTL,
-					   PCI_EXP_LNKCTL_ASPM_L1);
-	}
-
-	val = 0;
-	if (state & PCIE_LINK_STATE_L1_1)
-		val |= PCI_L1SS_CTL1_ASPM_L1_1;
-	if (state & PCIE_LINK_STATE_L1_2)
-		val |= PCI_L1SS_CTL1_ASPM_L1_2;
-	if (state & PCIE_LINK_STATE_L1_1_PCIPM)
-		val |= PCI_L1SS_CTL1_PCIPM_L1_1;
-	if (state & PCIE_LINK_STATE_L1_2_PCIPM)
-		val |= PCI_L1SS_CTL1_PCIPM_L1_2;
-
-	/* Enable what we need to enable */
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, val);
-	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, val);
 }
 
 static void pcie_config_aspm_dev(struct pci_dev *pdev, u32 val)
@@ -937,21 +1078,30 @@ static void pcie_config_aspm_link(struct pcie_link_state *link, u32 state)
 		dwstream |= PCI_EXP_LNKCTL_ASPM_L1;
 	}
 
+	/*
+	 * Per PCIe r6.2, sec 5.5.4, setting either or both of the enable
+	 * bits for ASPM L1 PM Substates must be done while ASPM L1 is
+	 * disabled. Disable L1 here and apply new configuration after L1SS
+	 * configuration has been completed.
+	 *
+	 * Per sec 7.5.3.7, when disabling ASPM L1, software must disable
+	 * it in the Downstream component prior to disabling it in the
+	 * Upstream component, and ASPM L1 must be enabled in the Upstream
+	 * component prior to enabling it in the Downstream component.
+	 *
+	 * Sec 7.5.3.7 also recommends programming the same ASPM Control
+	 * value for all functions of a multi-function device.
+	 */
+	list_for_each_entry(child, &linkbus->devices, bus_list)
+		pcie_config_aspm_dev(child, 0);
+	pcie_config_aspm_dev(parent, 0);
+
 	if (link->aspm_capable & PCIE_LINK_STATE_L1SS)
 		pcie_config_aspm_l1ss(link, state);
 
-	/*
-	 * Spec 2.0 suggests all functions should be configured the
-	 * same setting for ASPM. Enabling ASPM L1 should be done in
-	 * upstream component first and then downstream, and vice
-	 * versa for disabling ASPM L1. Spec doesn't mention L0S.
-	 */
-	if (state & PCIE_LINK_STATE_L1)
-		pcie_config_aspm_dev(parent, upstream);
+	pcie_config_aspm_dev(parent, upstream);
 	list_for_each_entry(child, &linkbus->devices, bus_list)
 		pcie_config_aspm_dev(child, dwstream);
-	if (!(state & PCIE_LINK_STATE_L1))
-		pcie_config_aspm_dev(parent, upstream);
 
 	link->aspm_enabled = state;
 
@@ -1015,7 +1165,7 @@ static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
 {
 	struct pcie_link_state *link;
 
-	link = kzalloc(sizeof(*link), GFP_KERNEL);
+	link = kzalloc_obj(*link);
 	if (!link)
 		return NULL;
 
@@ -1242,16 +1392,16 @@ void pcie_aspm_exit_link_state(struct pci_dev *pdev)
 	parent_link = link->parent;
 
 	/*
-	 * link->downstream is a pointer to the pci_dev of function 0.  If
-	 * we remove that function, the pci_dev is about to be deallocated,
-	 * so we can't use link->downstream again.  Free the link state to
-	 * avoid this.
+	 * Free the parent link state, no later than function 0 (i.e.
+	 * link->downstream) being removed.
 	 *
-	 * If we're removing a non-0 function, it's possible we could
-	 * retain the link state, but PCIe r6.0, sec 7.5.3.7, recommends
-	 * programming the same ASPM Control value for all functions of
-	 * multi-function devices, so disable ASPM for all of them.
+	 * Do not free the link state any earlier. If function 0 is a
+	 * switch upstream port, this link state is parent_link to all
+	 * subordinate ones.
 	 */
+	if (pdev != link->downstream)
+		goto out;
+
 	pcie_config_aspm_link(link, 0);
 	list_del(&link->sibling);
 	free_link_state(link);
@@ -1262,6 +1412,7 @@ void pcie_aspm_exit_link_state(struct pci_dev *pdev)
 		pcie_config_aspm_path(parent_link);
 	}
 
+ out:
 	mutex_unlock(&aspm_lock);
 	up_read(&pci_bus_sem);
 }
@@ -1442,6 +1593,9 @@ static int __pci_enable_link_state(struct pci_dev *pdev, int state, bool locked)
  * touch the LNKCTL register. Also note that this does not enable states
  * disabled by pci_disable_link_state(). Return 0 or a negative errno.
  *
+ * Note: Ensure devices are in D0 before enabling PCI-PM L1 PM Substates, per
+ * PCIe r6.0, sec 5.5.4.
+ *
  * @pdev: PCI device
  * @state: Mask of ASPM link states to enable
  */
@@ -1458,6 +1612,9 @@ EXPORT_SYMBOL(pci_enable_link_state);
  * can't touch the LNKCTL register. Also note that this does not enable states
  * disabled by pci_disable_link_state(). Return 0 or a negative errno.
  *
+ * Note: Ensure devices are in D0 before enabling PCI-PM L1 PM Substates, per
+ * PCIe r6.0, sec 5.5.4.
+ *
  * @pdev: PCI device
  * @state: Mask of ASPM link states to enable
  *
@@ -1470,6 +1627,19 @@ int pci_enable_link_state_locked(struct pci_dev *pdev, int state)
 	return __pci_enable_link_state(pdev, state, true);
 }
 EXPORT_SYMBOL(pci_enable_link_state_locked);
+
+void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap)
+{
+	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L0S)
+		pdev->aspm_l0s_support = 0;
+	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L1)
+		pdev->aspm_l1_support = 0;
+
+	pci_info(pdev, "ASPM: Link Capabilities%s%s treated as unsupported to avoid device defect\n",
+		 lnkcap & PCI_EXP_LNKCAP_ASPM_L0S ? " L0s" : "",
+		 lnkcap & PCI_EXP_LNKCAP_ASPM_L1 ? " L1" : "");
+
+}
 
 static int pcie_aspm_set_policy(const char *val,
 				const struct kernel_param *kp)
@@ -1677,11 +1847,11 @@ static int __init pcie_aspm_disable(char *str)
 {
 	if (!strcmp(str, "off")) {
 		aspm_policy = POLICY_DEFAULT;
-		aspm_disabled = 1;
+		aspm_disabled = true;
 		aspm_support_enabled = false;
 		pr_info("PCIe ASPM is disabled\n");
 	} else if (!strcmp(str, "force")) {
-		aspm_force = 1;
+		aspm_force = true;
 		pr_info("PCIe ASPM is forcibly enabled\n");
 	}
 	return 1;
@@ -1699,7 +1869,7 @@ void pcie_no_aspm(void)
 	 */
 	if (!aspm_force) {
 		aspm_policy = POLICY_DEFAULT;
-		aspm_disabled = 1;
+		aspm_disabled = true;
 	}
 }
 

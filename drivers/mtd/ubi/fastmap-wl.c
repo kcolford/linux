@@ -238,7 +238,7 @@ void ubi_refill_pools_and_lock(struct ubi_device *ubi)
 			if (left_free <= 0)
 				break;
 
-			e = find_wl_entry(ubi, &ubi->free, WL_FREE_MAX_DIFF,
+			e = find_wl_entry(ubi, &ubi->free, ubi->wl_free_max_diff,
 					  !can_fill_pools(ubi, left_free));
 			self_check_in_wl_tree(ubi, e, &ubi->free);
 			rb_erase(&e->u.rb, &ubi->free);
@@ -346,14 +346,27 @@ out:
  * WL sub-system.
  *
  * @ubi: UBI device description object
+ * @need_fill: whether to fill wear-leveling pool when no PEBs are found
  */
-static struct ubi_wl_entry *next_peb_for_wl(struct ubi_device *ubi)
+static struct ubi_wl_entry *next_peb_for_wl(struct ubi_device *ubi,
+					    bool need_fill)
 {
 	struct ubi_fm_pool *pool = &ubi->fm_wl_pool;
 	int pnum;
 
-	if (pool->used == pool->size)
+	if (pool->used == pool->size) {
+		if (need_fill && !ubi->fm_work_scheduled) {
+			/*
+			 * We cannot update the fastmap here because this
+			 * function is called in atomic context.
+			 * Let's fail here and refill/update it as soon as
+			 * possible.
+			 */
+			ubi->fm_work_scheduled = 1;
+			schedule_work(&ubi->fm_work);
+		}
 		return NULL;
+	}
 
 	pnum = pool->pebs[pool->used];
 	return ubi->lookuptbl[pnum];
@@ -375,22 +388,22 @@ static bool need_wear_leveling(struct ubi_device *ubi)
 	if (!ubi->used.rb_node)
 		return false;
 
-	e = next_peb_for_wl(ubi);
+	e = next_peb_for_wl(ubi, false);
 	if (!e) {
 		if (!ubi->free.rb_node)
 			return false;
-		e = find_wl_entry(ubi, &ubi->free, WL_FREE_MAX_DIFF, 0);
+		e = find_wl_entry(ubi, &ubi->free, ubi->wl_free_max_diff, 0);
 		ec = e->ec;
 	} else {
 		ec = e->ec;
 		if (ubi->free.rb_node) {
-			e = find_wl_entry(ubi, &ubi->free, WL_FREE_MAX_DIFF, 0);
+			e = find_wl_entry(ubi, &ubi->free, ubi->wl_free_max_diff, 0);
 			ec = max(ec, e->ec);
 		}
 	}
 	e = rb_entry(rb_first(&ubi->used), struct ubi_wl_entry, u.rb);
 
-	return ec - e->ec >= UBI_WL_THRESHOLD;
+	return ec - e->ec >= ubi->wl_threshold;
 }
 
 /* get_peb_for_wl - returns a PEB to be used internally by the WL sub-system.
@@ -453,7 +466,7 @@ int ubi_ensure_anchor_pebs(struct ubi_device *ubi)
 	ubi->wl_scheduled = 1;
 	spin_unlock(&ubi->wl_lock);
 
-	wrk = kmalloc(sizeof(struct ubi_work), GFP_NOFS);
+	wrk = kmalloc_obj(struct ubi_work, GFP_NOFS);
 	if (!wrk) {
 		spin_lock(&ubi->wl_lock);
 		ubi->wl_scheduled = 0;
@@ -517,8 +530,6 @@ int ubi_is_erase_work(struct ubi_work *wrk)
 
 static void ubi_fastmap_close(struct ubi_device *ubi)
 {
-	int i;
-
 	return_unused_pool_pebs(ubi, &ubi->fm_pool);
 	return_unused_pool_pebs(ubi, &ubi->fm_wl_pool);
 
@@ -527,11 +538,7 @@ static void ubi_fastmap_close(struct ubi_device *ubi)
 		ubi->fm_anchor = NULL;
 	}
 
-	if (ubi->fm) {
-		for (i = 0; i < ubi->fm->used_blocks; i++)
-			kfree(ubi->fm->e[i]);
-	}
-	kfree(ubi->fm);
+	ubi_free_fastmap(ubi);
 }
 
 /**

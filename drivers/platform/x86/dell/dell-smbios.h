@@ -33,12 +33,21 @@
 #define KBD_LED_AUTO_50_TOKEN	0x02EB
 #define KBD_LED_AUTO_75_TOKEN	0x02EC
 #define KBD_LED_AUTO_100_TOKEN	0x02F6
+#define BAT_PRI_AC_MODE_TOKEN	0x0341
+#define BAT_ADAPTIVE_MODE_TOKEN	0x0342
+#define BAT_CUSTOM_MODE_TOKEN	0x0343
+#define BAT_STANDARD_MODE_TOKEN	0x0346
+#define BAT_EXPRESS_MODE_TOKEN	0x0347
+#define BAT_CUSTOM_CHARGE_START	0x0349
+#define BAT_CUSTOM_CHARGE_END	0x034A
 #define GLOBAL_MIC_MUTE_ENABLE	0x0364
 #define GLOBAL_MIC_MUTE_DISABLE	0x0365
 #define GLOBAL_MUTE_ENABLE	0x058C
 #define GLOBAL_MUTE_DISABLE	0x058D
 
 struct notifier_block;
+
+typedef int (*smbios_callback_fn_t)(struct device *dev, struct calling_interface_buffer *buffer);
 
 struct calling_interface_token {
 	u16 tokenID;
@@ -57,7 +66,7 @@ struct calling_interface_structure {
 	struct calling_interface_token tokens[];
 } __packed;
 
-int dell_smbios_register_device(struct device *d, void *call_fn);
+int dell_smbios_register_device(struct device *d, int priority, smbios_callback_fn_t call_fn);
 void dell_smbios_unregister_device(struct device *d);
 
 int dell_smbios_error(int value);

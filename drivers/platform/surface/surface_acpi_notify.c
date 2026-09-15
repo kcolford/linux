@@ -11,7 +11,7 @@
  * Copyright (C) 2019-2022 Maximilian Luz <luzmaximilian@gmail.com>
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/acpi.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
@@ -777,11 +777,15 @@ static int san_consumer_links_setup(struct platform_device *pdev)
 
 static int san_probe(struct platform_device *pdev)
 {
-	struct acpi_device *san = ACPI_COMPANION(&pdev->dev);
 	struct ssam_controller *ctrl;
+	struct acpi_device *san;
 	struct san_data *data;
 	acpi_status astatus;
 	int status;
+
+	san = ACPI_COMPANION(&pdev->dev);
+	if (!san)
+		return -ENODEV;
 
 	ctrl = ssam_client_bind(&pdev->dev);
 	if (IS_ERR(ctrl))
@@ -850,7 +854,7 @@ MODULE_DEVICE_TABLE(acpi, san_match);
 
 static struct platform_driver surface_acpi_notify = {
 	.probe = san_probe,
-	.remove_new = san_remove,
+	.remove = san_remove,
 	.driver = {
 		.name = "surface_acpi_notify",
 		.acpi_match_table = san_match,
@@ -862,7 +866,7 @@ static int __init san_init(void)
 {
 	int ret;
 
-	san_wq = alloc_workqueue("san_wq", 0, 0);
+	san_wq = alloc_workqueue("san_wq", WQ_PERCPU, 0);
 	if (!san_wq)
 		return -ENOMEM;
 	ret = platform_driver_register(&surface_acpi_notify);

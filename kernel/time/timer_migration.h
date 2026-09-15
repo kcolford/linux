@@ -6,6 +6,24 @@
 #define TMIGR_CHILDREN_PER_GROUP 8
 
 /**
+ * struct tmigr_hierarchy - a hierarchy associated to a given CPU capacity.
+ *                          Homogeneous systems have only one hierarchy.
+ *                          Heterogenous have one hierarchy per CPU capacity.
+ * @cpumask:	CPUs belonging to this hierarchy
+ * @root:	The current root of the hierarchy
+ * @capacity:	CPU capacity associated to this hierarchy
+ * @node:	Node in the global hierarchy list
+ * @level_list:	Per level lists of tmigr groups
+ */
+struct tmigr_hierarchy {
+	struct cpumask		*cpumask;
+	struct tmigr_group	*root;
+	unsigned long		capacity;
+	struct list_head	node;
+	struct list_head	level_list[];
+};
+
+/**
  * struct tmigr_event - a timer event associated to a CPU
  * @nextevt:	The node to enqueue an event in the parent group queue
  * @cpu:	The CPU to which this event belongs
@@ -22,7 +40,17 @@ struct tmigr_event {
  * struct tmigr_group - timer migration hierarchy group
  * @lock:		Lock protecting the event information and group hierarchy
  *			information during setup
- * @parent:		Pointer to the parent group
+ * @parent:		Pointer to the parent group. Pointer is updated when a
+ *			new hierarchy level is added because of a CPU coming
+ *			online the first time. Once it is set, the pointer will
+ *			not be removed or updated. When accessing parent pointer
+ *			lock less to decide whether to abort a propagation or
+ *			not, it is not a problem. The worst outcome is an
+ *			unnecessary/early CPU wake up. But do not access parent
+ *			pointer several times in the same 'action' (like
+ *			activation, deactivation, check for remote expiry,...)
+ *			without holding the lock as it is not ensured that value
+ *			will not change.
  * @groupevt:		Next event of the group which is only used when the
  *			group is !active. The group event is then queued into
  *			the parent timer queue.
@@ -41,9 +69,8 @@ struct tmigr_event {
  * @num_children:	Counter of group children to make sure the group is only
  *			filled with TMIGR_CHILDREN_PER_GROUP; Required for setup
  *			only
- * @childmask:		childmask of the group in the parent group; is set
- *			during setup and will never change; can be read
- *			lockless
+ * @groupmask:		mask of the group in the parent group; is set during
+ *			setup and will never change; can be read lockless
  * @list:		List head that is added to the per level
  *			tmigr_level_list; is required during setup when a
  *			new group needs to be connected to the existing
@@ -59,27 +86,29 @@ struct tmigr_group {
 	unsigned int		level;
 	int			numa_node;
 	unsigned int		num_children;
-	u8			childmask;
+	u8			groupmask;
 	struct list_head	list;
 };
 
 /**
  * struct tmigr_cpu - timer migration per CPU group
  * @lock:		Lock protecting the tmigr_cpu group information
- * @online:		Indicates whether the CPU is online; In deactivate path
- *			it is required to know whether the migrator in the top
- *			level group is to be set offline, while a timer is
- *			pending. Then another online CPU needs to be notified to
- *			take over the migrator role. Furthermore the information
- *			is required in CPU hotplug path as the CPU is able to go
- *			idle before the timer migration hierarchy hotplug AP is
- *			reached. During this phase, the CPU has to handle the
+ * @available:		Indicates whether the CPU is available for handling
+ *			global timers. In the deactivate path it is required to
+ *			know whether the migrator in the top level group is to
+ *			be set offline, while a timer is pending. Then another
+ *			available CPU needs to be notified to take over the
+ *			migrator role. Furthermore the information is required
+ *			in the CPU hotplug path as the CPU is able to go idle
+ *			before the timer migration hierarchy hotplug callback is
+ *			reached.  During this phase, the CPU has to handle the
  *			global timers on its own and must not act as a migrator.
+ *
  * @idle:		Indicates whether the CPU is idle in the timer migration
  *			hierarchy
  * @remote:		Is set when timers of the CPU are expired remotely
  * @tmgroup:		Pointer to the parent group
- * @childmask:		childmask of tmigr_cpu in the parent group
+ * @groupmask:		mask of tmigr_cpu in the parent group
  * @wakeup:		Stores the first timer when the timer migration
  *			hierarchy is completely idle and remote expiry was done;
  *			is returned to timer code in the idle path and is only
@@ -88,11 +117,11 @@ struct tmigr_group {
  */
 struct tmigr_cpu {
 	raw_spinlock_t		lock;
-	bool			online;
+	bool			available;
 	bool			idle;
 	bool			remote;
 	struct tmigr_group	*tmgroup;
-	u8			childmask;
+	u8			groupmask;
 	u64			wakeup;
 	struct tmigr_event	cpuevt;
 };
@@ -101,22 +130,19 @@ struct tmigr_cpu {
  * union tmigr_state - state of tmigr_group
  * @state:	Combined version of the state - only used for atomic
  *		read/cmpxchg function
- * @struct:	Split version of the state - only use the struct members to
+ * &anon struct: Split version of the state - only use the struct members to
  *		update information to stay independent of endianness
+ * @active:	Contains each mask bit of the active children
+ * @migrator:	Contains mask of the child which is migrator
+ * @seq:	Sequence counter needs to be increased when an update
+ *		to the tmigr_state is done. It prevents a race when
+ *		updates in the child groups are propagated in changed
+ *		order. Detailed information about the scenario is
+ *		given in the documentation at the begin of
+ *		timer_migration.c.
  */
 union tmigr_state {
 	u32 state;
-	/**
-	 * struct - split state of tmigr_group
-	 * @active:	Contains each childmask bit of the active children
-	 * @migrator:	Contains childmask of the child which is migrator
-	 * @seq:	Sequence counter needs to be increased when an update
-	 *		to the tmigr_state is done. It prevents a race when
-	 *		updates in the child groups are propagated in changed
-	 *		order. Detailed information about the scenario is
-	 *		given in the documentation at the begin of
-	 *		timer_migration.c.
-	 */
 	struct {
 		u8	active;
 		u8	migrator;

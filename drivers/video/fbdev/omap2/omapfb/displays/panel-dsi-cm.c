@@ -15,7 +15,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/sched/signal.h>
@@ -1151,13 +1150,13 @@ static int dsicm_probe(struct platform_device *pdev)
 	dssdev->caps = OMAP_DSS_DISPLAY_CAP_MANUAL_UPDATE |
 		OMAP_DSS_DISPLAY_CAP_TEAR_ELIM;
 
+	mutex_init(&ddata->lock);
+
 	r = omapdss_register_display(dssdev);
 	if (r) {
 		dev_err(dev, "Failed to register panel\n");
 		goto err_reg;
 	}
-
-	mutex_init(&ddata->lock);
 
 	atomic_set(&ddata->do_update, 0);
 
@@ -1186,10 +1185,8 @@ static int dsicm_probe(struct platform_device *pdev)
 				IRQF_TRIGGER_RISING,
 				"taal vsync", ddata);
 
-		if (r) {
-			dev_err(dev, "IRQ request failed\n");
+		if (r)
 			return r;
-		}
 
 		INIT_DEFERRABLE_WORK(&ddata->te_timeout_work,
 					dsicm_te_timeout_work_callback);
@@ -1215,7 +1212,7 @@ static int dsicm_probe(struct platform_device *pdev)
 
 		ddata->bldev = bldev;
 
-		bldev->props.power = FB_BLANK_UNBLANK;
+		bldev->props.power = BACKLIGHT_POWER_ON;
 		bldev->props.brightness = 255;
 
 		dsicm_bl_update_status(bldev);
@@ -1253,7 +1250,7 @@ static void dsicm_remove(struct platform_device *pdev)
 
 	bldev = ddata->bldev;
 	if (bldev != NULL) {
-		bldev->props.power = FB_BLANK_POWERDOWN;
+		bldev->props.power = BACKLIGHT_POWER_OFF;
 		dsicm_bl_update_status(bldev);
 		backlight_device_unregister(bldev);
 	}
@@ -1275,7 +1272,7 @@ MODULE_DEVICE_TABLE(of, dsicm_of_match);
 
 static struct platform_driver dsicm_driver = {
 	.probe = dsicm_probe,
-	.remove_new = dsicm_remove,
+	.remove = dsicm_remove,
 	.driver = {
 		.name = "panel-dsi-cm",
 		.of_match_table = dsicm_of_match,

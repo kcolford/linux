@@ -222,6 +222,13 @@ struct drm_dp_mst_branch {
 	 */
 	struct list_head destroy_next;
 
+	/**
+	 * @rad: Relative Address of the MST branch.
+	 * For &drm_dp_mst_topology_mgr.mst_primary, it's rad[8] are all 0,
+	 * unset and unused. For MST branches connected after mst_primary,
+	 * in each element of rad[] the nibbles are ordered by the most
+	 * signifcant 4 bits first and the least significant 4 bits second.
+	 */
 	u8 rad[8];
 	u8 lct;
 	int num_ports;
@@ -244,18 +251,18 @@ struct drm_dp_mst_branch {
 	bool link_address_sent;
 
 	/* global unique identifier to identify branch devices */
-	u8 guid[16];
+	guid_t guid;
 };
 
 
 struct drm_dp_nak_reply {
-	u8 guid[16];
+	guid_t guid;
 	u8 reason;
 	u8 nak_data;
 };
 
 struct drm_dp_link_address_ack_reply {
-	u8 guid[16];
+	guid_t guid;
 	u8 nports;
 	struct drm_dp_link_addr_reply_port {
 		bool input_port;
@@ -265,7 +272,7 @@ struct drm_dp_link_address_ack_reply {
 		bool ddps;
 		bool legacy_device_plug_status;
 		u8 dpcd_revision;
-		u8 peer_guid[16];
+		guid_t peer_guid;
 		u8 num_sdp_streams;
 		u8 num_sdp_stream_sinks;
 	} ports[16];
@@ -348,7 +355,7 @@ struct drm_dp_allocate_payload_ack_reply {
 };
 
 struct drm_dp_connection_status_notify {
-	u8 guid[16];
+	guid_t guid;
 	u8 port_number;
 	bool legacy_device_plug_status;
 	bool displayport_device_plug_status;
@@ -425,7 +432,7 @@ struct drm_dp_query_payload {
 
 struct drm_dp_resource_status_notify {
 	u8 port_number;
-	u8 guid[16];
+	guid_t guid;
 	u16 available_pbn;
 };
 
@@ -700,6 +707,13 @@ struct drm_dp_mst_topology_mgr {
 	bool payload_id_table_cleared : 1;
 
 	/**
+	 * @reset_rx_state: The down request's reply and up request message
+	 * receiver state must be reset, after the topology manager got
+	 * removed. Protected by @lock.
+	 */
+	bool reset_rx_state : 1;
+
+	/**
 	 * @payload_count: The number of currently active payloads in hardware. This value is only
 	 * intended to be used internally by MST helpers for payload tracking, and is only safe to
 	 * read/write from the atomic commit (not check) context.
@@ -860,8 +874,7 @@ struct edid *drm_dp_mst_get_edid(struct drm_connector *connector,
 				 struct drm_dp_mst_topology_mgr *mgr,
 				 struct drm_dp_mst_port *port);
 
-fixed20_12 drm_dp_get_vc_payload_bw(const struct drm_dp_mst_topology_mgr *mgr,
-				    int link_rate, int link_lane_count);
+fixed20_12 drm_dp_get_vc_payload_bw(int link_rate, int link_lane_count);
 
 int drm_dp_calc_pbn_mode(int clock, int bpp);
 
@@ -885,6 +898,8 @@ int drm_dp_check_act_status(struct drm_dp_mst_topology_mgr *mgr);
 void drm_dp_mst_dump_topology(struct seq_file *m,
 			      struct drm_dp_mst_topology_mgr *mgr);
 
+void drm_dp_mst_topology_queue_probe(struct drm_dp_mst_topology_mgr *mgr);
+
 void drm_dp_mst_topology_mgr_suspend(struct drm_dp_mst_topology_mgr *mgr);
 int __must_check
 drm_dp_mst_topology_mgr_resume(struct drm_dp_mst_topology_mgr *mgr,
@@ -901,13 +916,13 @@ void drm_dp_mst_connector_early_unregister(struct drm_connector *connector,
 					   struct drm_dp_mst_port *port);
 
 struct drm_dp_mst_topology_state *
-drm_atomic_get_mst_topology_state(struct drm_atomic_state *state,
+drm_atomic_get_mst_topology_state(struct drm_atomic_commit *state,
 				  struct drm_dp_mst_topology_mgr *mgr);
 struct drm_dp_mst_topology_state *
-drm_atomic_get_old_mst_topology_state(struct drm_atomic_state *state,
+drm_atomic_get_old_mst_topology_state(struct drm_atomic_commit *state,
 				      struct drm_dp_mst_topology_mgr *mgr);
 struct drm_dp_mst_topology_state *
-drm_atomic_get_new_mst_topology_state(struct drm_atomic_state *state,
+drm_atomic_get_new_mst_topology_state(struct drm_atomic_commit *state,
 				      struct drm_dp_mst_topology_mgr *mgr);
 struct drm_dp_mst_atomic_payload *
 drm_atomic_get_mst_payload_state(struct drm_dp_mst_topology_state *state,
@@ -916,31 +931,31 @@ bool drm_dp_mst_port_downstream_of_parent(struct drm_dp_mst_topology_mgr *mgr,
 					  struct drm_dp_mst_port *port,
 					  struct drm_dp_mst_port *parent);
 int __must_check
-drm_dp_atomic_find_time_slots(struct drm_atomic_state *state,
+drm_dp_atomic_find_time_slots(struct drm_atomic_commit *state,
 			      struct drm_dp_mst_topology_mgr *mgr,
 			      struct drm_dp_mst_port *port, int pbn);
-int drm_dp_mst_atomic_enable_dsc(struct drm_atomic_state *state,
+int drm_dp_mst_atomic_enable_dsc(struct drm_atomic_commit *state,
 				 struct drm_dp_mst_port *port,
 				 int pbn, bool enable);
 int __must_check
-drm_dp_mst_add_affected_dsc_crtcs(struct drm_atomic_state *state,
+drm_dp_mst_add_affected_dsc_crtcs(struct drm_atomic_commit *state,
 				  struct drm_dp_mst_topology_mgr *mgr);
 int __must_check
-drm_dp_atomic_release_time_slots(struct drm_atomic_state *state,
+drm_dp_atomic_release_time_slots(struct drm_atomic_commit *state,
 				 struct drm_dp_mst_topology_mgr *mgr,
 				 struct drm_dp_mst_port *port);
-void drm_dp_mst_atomic_wait_for_dependencies(struct drm_atomic_state *state);
-int __must_check drm_dp_mst_atomic_setup_commit(struct drm_atomic_state *state);
+void drm_dp_mst_atomic_wait_for_dependencies(struct drm_atomic_commit *state);
+int __must_check drm_dp_mst_atomic_setup_commit(struct drm_atomic_commit *state);
 int drm_dp_send_power_updown_phy(struct drm_dp_mst_topology_mgr *mgr,
 				 struct drm_dp_mst_port *port, bool power_up);
 int drm_dp_send_query_stream_enc_status(struct drm_dp_mst_topology_mgr *mgr,
 		struct drm_dp_mst_port *port,
 		struct drm_dp_query_stream_enc_status_ack_reply *status);
-int __must_check drm_dp_mst_atomic_check_mgr(struct drm_atomic_state *state,
+int __must_check drm_dp_mst_atomic_check_mgr(struct drm_atomic_commit *state,
 					     struct drm_dp_mst_topology_mgr *mgr,
 					     struct drm_dp_mst_topology_state *mst_state,
 					     struct drm_dp_mst_port **failing_port);
-int __must_check drm_dp_mst_atomic_check(struct drm_atomic_state *state);
+int __must_check drm_dp_mst_atomic_check(struct drm_atomic_commit *state);
 int __must_check drm_dp_mst_root_conn_atomic_check(struct drm_connector_state *new_conn_state,
 						   struct drm_dp_mst_topology_mgr *mgr);
 
@@ -967,7 +982,7 @@ extern const struct drm_private_state_funcs drm_dp_mst_topology_state_funcs;
 /**
  * __drm_dp_mst_state_iter_get - private atomic state iterator function for
  * macro-internal use
- * @state: &struct drm_atomic_state pointer
+ * @state: &struct drm_atomic_commit pointer
  * @mgr: pointer to the &struct drm_dp_mst_topology_mgr iteration cursor
  * @old_state: optional pointer to the old &struct drm_dp_mst_topology_state
  * iteration cursor
@@ -984,7 +999,7 @@ extern const struct drm_private_state_funcs drm_dp_mst_topology_state_funcs;
  * drm_dp_mst_topology_mgr, false otherwise.
  */
 static inline bool
-__drm_dp_mst_state_iter_get(struct drm_atomic_state *state,
+__drm_dp_mst_state_iter_get(struct drm_atomic_commit *state,
 			    struct drm_dp_mst_topology_mgr **mgr,
 			    struct drm_dp_mst_topology_state **old_state,
 			    struct drm_dp_mst_topology_state **new_state,
@@ -1007,7 +1022,7 @@ __drm_dp_mst_state_iter_get(struct drm_atomic_state *state,
 /**
  * for_each_oldnew_mst_mgr_in_state - iterate over all DP MST topology
  * managers in an atomic update
- * @__state: &struct drm_atomic_state pointer
+ * @__state: &struct drm_atomic_commit pointer
  * @mgr: &struct drm_dp_mst_topology_mgr iteration cursor
  * @old_state: &struct drm_dp_mst_topology_state iteration cursor for the old
  * state
@@ -1026,7 +1041,7 @@ __drm_dp_mst_state_iter_get(struct drm_atomic_state *state,
 /**
  * for_each_old_mst_mgr_in_state - iterate over all DP MST topology managers
  * in an atomic update
- * @__state: &struct drm_atomic_state pointer
+ * @__state: &struct drm_atomic_commit pointer
  * @mgr: &struct drm_dp_mst_topology_mgr iteration cursor
  * @old_state: &struct drm_dp_mst_topology_state iteration cursor for the old
  * state
@@ -1043,7 +1058,7 @@ __drm_dp_mst_state_iter_get(struct drm_atomic_state *state,
 /**
  * for_each_new_mst_mgr_in_state - iterate over all DP MST topology managers
  * in an atomic update
- * @__state: &struct drm_atomic_state pointer
+ * @__state: &struct drm_atomic_commit pointer
  * @mgr: &struct drm_dp_mst_topology_mgr iteration cursor
  * @new_state: &struct drm_dp_mst_topology_state iteration cursor for the new
  * state

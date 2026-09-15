@@ -145,8 +145,8 @@ static int max11205_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id max11205_spi_ids[] = {
-	{ "max11205a", (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205A] },
-	{ "max11205b", (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205B] },
+	{ .name = "max11205a", .driver_data = (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205A] },
+	{ .name = "max11205b", .driver_data = (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205B] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, max11205_spi_ids);
@@ -177,4 +177,4 @@ module_spi_driver(max11205_spi_driver);
 MODULE_AUTHOR("Ramona Bolboaca <ramona.bolboaca@analog.com>");
 MODULE_DESCRIPTION("MAX11205 ADC driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_AD_SIGMA_DELTA);
+MODULE_IMPORT_NS("IIO_AD_SIGMA_DELTA");

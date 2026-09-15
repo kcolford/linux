@@ -4,7 +4,7 @@
  * Portions Copyright (C) 2000-2008 Silicon Graphics, Inc.
  */
 
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -51,8 +51,7 @@ xfs_attr_grab_log_assist(
 		return error;
 	xfs_set_using_logged_xattrs(mp);
 
-	xfs_warn_mount(mp, XFS_OPSTATE_WARNED_LARP,
- "EXPERIMENTAL logged extended attributes feature in use. Use at your own risk!");
+	xfs_warn_experimental(mp, XFS_EXPERIMENTAL_LARP);
 
 	return 0;
 }
@@ -105,12 +104,29 @@ xfs_attr_change(
 		args->op_flags |= XFS_DA_OP_LOGGED;
 	}
 
-	args->owner = args->dp->i_ino;
+	args->owner = I_INO(args->dp);
 	args->geo = mp->m_attr_geo;
 	args->whichfork = XFS_ATTR_FORK;
 	xfs_attr_sethash(args);
 
-	return xfs_attr_set(args, op, args->attr_filter & XFS_ATTR_ROOT);
+	/*
+	 * Some xattrs must be resistant to allocation failure at ENOSPC, e.g.
+	 * creating an inode with ACLs or security attributes requires the
+	 * allocation of the xattr holding that information to succeed. Hence
+	 * we allow xattrs in the VFS TRUSTED, SYSTEM, POSIX_ACL and SECURITY
+	 * (LSM xattr) namespaces to dip into the reserve block pool to allow
+	 * manipulation of these xattrs when at ENOSPC. These VFS xattr
+	 * namespaces translate to the XFS_ATTR_ROOT and XFS_ATTR_SECURE on-disk
+	 * namespaces.
+	 *
+	 * For most of these cases, these special xattrs will fit in the inode
+	 * itself and so consume no extra space or only require temporary extra
+	 * space while an overwrite is being made. Hence the use of the reserved
+	 * pool is largely to avoid the worst case reservation from preventing
+	 * the xattr from being created at ENOSPC.
+	 */
+	return xfs_attr_set(args, op,
+			args->attr_filter & (XFS_ATTR_ROOT | XFS_ATTR_SECURE));
 }
 
 
@@ -227,7 +243,7 @@ __xfs_xattr_put_listent(
 	offset = context->buffer + context->count;
 	memcpy(offset, prefix, prefix_len);
 	offset += prefix_len;
-	strncpy(offset, (char *)name, namelen);			/* real name */
+	memcpy(offset, (char *)name, namelen);			/* real name */
 	offset += namelen;
 	*offset = '\0';
 
@@ -316,8 +332,8 @@ xfs_vn_listxattr(
 	memset(&context, 0, sizeof(context));
 	context.dp = XFS_I(inode);
 	context.resynch = 1;
-	context.buffer = size ? data : NULL;
 	context.bufsize = size;
+	context.buffer = size ? data : NULL;
 	context.firstu = context.bufsize;
 	context.put_listent = xfs_xattr_put_listent;
 

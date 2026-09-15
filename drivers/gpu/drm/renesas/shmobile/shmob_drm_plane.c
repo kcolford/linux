@@ -143,7 +143,7 @@ static void shmob_drm_overlay_plane_setup(struct shmob_drm_plane *splane,
 }
 
 static int shmob_drm_plane_atomic_check(struct drm_plane *plane,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
 	struct shmob_drm_plane_state *sstate = to_shmob_plane_state(new_plane_state);
@@ -192,7 +192,7 @@ static int shmob_drm_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void shmob_drm_plane_atomic_update(struct drm_plane *plane,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
 	struct shmob_drm_plane *splane = to_shmob_plane(plane);
@@ -207,7 +207,7 @@ static void shmob_drm_plane_atomic_update(struct drm_plane *plane,
 }
 
 static void shmob_drm_plane_atomic_disable(struct drm_plane *plane,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
 	struct shmob_drm_device *sdev = to_shmob_device(plane->dev);
@@ -260,7 +260,7 @@ static void shmob_drm_plane_reset(struct drm_plane *plane)
 		plane->state = NULL;
 	}
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (state == NULL)
 		return;
 
@@ -271,6 +271,13 @@ static const struct drm_plane_helper_funcs shmob_drm_plane_helper_funcs = {
 	.atomic_check = shmob_drm_plane_atomic_check,
 	.atomic_update = shmob_drm_plane_atomic_update,
 	.atomic_disable = shmob_drm_plane_atomic_disable,
+};
+
+static const struct drm_plane_helper_funcs shmob_drm_primary_plane_helper_funcs = {
+	.atomic_check = shmob_drm_plane_atomic_check,
+	.atomic_update = shmob_drm_plane_atomic_update,
+	.atomic_disable = shmob_drm_plane_atomic_disable,
+	.get_scanout_buffer = drm_fb_dma_get_scanout_buffer,
 };
 
 static const struct drm_plane_funcs shmob_drm_plane_funcs = {
@@ -310,7 +317,12 @@ struct drm_plane *shmob_drm_plane_create(struct shmob_drm_device *sdev,
 
 	splane->index = index;
 
-	drm_plane_helper_add(&splane->base, &shmob_drm_plane_helper_funcs);
+	if (type == DRM_PLANE_TYPE_PRIMARY)
+		drm_plane_helper_add(&splane->base,
+				     &shmob_drm_primary_plane_helper_funcs);
+	else
+		drm_plane_helper_add(&splane->base,
+				     &shmob_drm_plane_helper_funcs);
 
 	return &splane->base;
 }

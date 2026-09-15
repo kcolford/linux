@@ -44,8 +44,7 @@ void dcn20_update_plane_addr(const struct dc *dc, struct pipe_ctx *pipe_ctx);
 void dcn20_update_mpcc(struct dc *dc, struct pipe_ctx *pipe_ctx);
 bool dcn20_set_input_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx,
 			const struct dc_plane_state *plane_state);
-bool dcn20_set_output_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx,
-			const struct dc_stream_state *stream);
+bool dcn20_set_output_transfer_func(struct set_output_transfer_func_params *params);
 void dcn20_program_output_csc(struct dc *dc,
 		struct pipe_ctx *pipe_ctx,
 		enum dc_color_space colorspace,
@@ -154,6 +153,21 @@ void dcn20_setup_gsl_group_as_lock(
 		const struct dc *dc,
 		struct pipe_ctx *pipe_ctx,
 		bool enable);
-
+void dcn20_detect_pipe_changes(
+		struct dc_state *old_state,
+		struct dc_state *new_state,
+		struct pipe_ctx *old_pipe,
+		struct pipe_ctx *new_pipe);
+void dcn20_enable_plane(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct dc_state *context);
+void dcn20_update_dchubp_dpp(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct dc_state *context);
+void dcn20_post_unlock_reset_opp(
+		struct dc *dc,
+		struct pipe_ctx *opp_head);
 #endif /* __DC_HWSS_DCN20_H__ */
 

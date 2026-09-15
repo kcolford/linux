@@ -8,7 +8,6 @@
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/sgi-w1.h>
 
@@ -117,7 +116,7 @@ static struct platform_driver sgi_w1_driver = {
 		.name = "sgi_w1",
 	},
 	.probe = sgi_w1_probe,
-	.remove_new = sgi_w1_remove,
+	.remove = sgi_w1_remove,
 };
 module_platform_driver(sgi_w1_driver);
 

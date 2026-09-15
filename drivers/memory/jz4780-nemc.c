@@ -313,10 +313,9 @@ static int jz4780_nemc_probe(struct platform_device *pdev)
 	writel(0, nemc->base + NEMC_NFCSR);
 
 	nemc->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(nemc->clk)) {
-		dev_err(dev, "failed to get clock\n");
-		return PTR_ERR(nemc->clk);
-	}
+	if (IS_ERR(nemc->clk))
+		return dev_err_probe(dev, PTR_ERR(nemc->clk),
+				     "failed to get clock\n");
 
 	ret = clk_prepare_enable(nemc->clk);
 	if (ret) {
@@ -407,7 +406,7 @@ static const struct of_device_id jz4780_nemc_dt_match[] = {
 
 static struct platform_driver jz4780_nemc_driver = {
 	.probe		= jz4780_nemc_probe,
-	.remove_new	= jz4780_nemc_remove,
+	.remove		= jz4780_nemc_remove,
 	.driver	= {
 		.name	= "jz4780-nemc",
 		.of_match_table = of_match_ptr(jz4780_nemc_dt_match),

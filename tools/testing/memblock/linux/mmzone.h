@@ -3,6 +3,7 @@
 #define _TOOLS_MMZONE_H
 
 #include <linux/atomic.h>
+#include <linux/memory_hotplug.h>
 
 struct pglist_data *first_online_pgdat(void);
 struct pglist_data *next_online_pgdat(struct pglist_data *pgdat);
@@ -33,5 +34,9 @@ typedef struct pglist_data {
 	struct zone node_zones[MAX_NR_ZONES];
 
 } pg_data_t;
+
+enum migratetype {
+	MIGRATE_CMA,
+};
 
 #endif

@@ -3,6 +3,10 @@
  * ECAP PWM driver
  *
  * Copyright (C) 2012 Texas Instruments, Inc. - https://www.ti.com/
+ *
+ * Hardware properties:
+ * - On disable the PWM pin becomes an input, so the behaviour depends on
+ *   external wiring.
  */
 
 #include <linux/module.h>
@@ -207,9 +211,9 @@ static const struct pwm_ops ecap_pwm_ops = {
 };
 
 static const struct of_device_id ecap_of_match[] = {
-	{ .compatible	= "ti,am3352-ecap" },
-	{ .compatible	= "ti,am33xx-ecap" },
-	{},
+	{ .compatible = "ti,am3352-ecap" },
+	{ .compatible = "ti,am33xx-ecap" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ecap_of_match);
 
@@ -324,7 +328,7 @@ static struct platform_driver ecap_pwm_driver = {
 		.pm = pm_ptr(&ecap_pwm_pm_ops),
 	},
 	.probe = ecap_pwm_probe,
-	.remove_new = ecap_pwm_remove,
+	.remove = ecap_pwm_remove,
 };
 module_platform_driver(ecap_pwm_driver);
 

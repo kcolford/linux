@@ -158,7 +158,6 @@ static int ti_qspi_setup(struct spi_device *spi)
 		return ret;
 	}
 
-	pm_runtime_mark_last_busy(qspi->dev);
 	ret = pm_runtime_put_autosuspend(qspi->dev);
 	if (ret < 0) {
 		dev_err(qspi->dev, "pm_runtime_put_autosuspend() failed\n");
@@ -195,7 +194,6 @@ static void ti_qspi_setup_clk(struct ti_qspi *qspi, u32 speed_hz)
 		ctx_reg->clkctrl = clk_ctrl_new;
 	}
 
-	pm_runtime_mark_last_busy(qspi->dev);
 	pm_runtime_put_autosuspend(qspi->dev);
 }
 
@@ -623,7 +621,7 @@ static int ti_qspi_exec_mem_op(struct spi_mem *mem,
 	mutex_lock(&qspi->list_lock);
 
 	if (!qspi->mmap_enabled || qspi->current_cs != spi_get_chipselect(mem->spi, 0)) {
-		ti_qspi_setup_clk(qspi, mem->spi->max_speed_hz);
+		ti_qspi_setup_clk(qspi, op->max_freq);
 		ti_qspi_enable_memory_map(mem->spi);
 	}
 	ti_qspi_setup_mmap_read(mem->spi, op->cmd.opcode, op->data.buswidth,
@@ -656,6 +654,10 @@ static int ti_qspi_exec_mem_op(struct spi_mem *mem,
 static const struct spi_controller_mem_ops ti_qspi_mem_ops = {
 	.exec_op = ti_qspi_exec_mem_op,
 	.adjust_op_size = ti_qspi_adjust_op_size,
+};
+
+static const struct spi_controller_mem_caps ti_qspi_mem_caps = {
+	.per_op_freq = true,
 };
 
 static int ti_qspi_start_transfer_one(struct spi_controller *host,
@@ -763,7 +765,7 @@ static int ti_qspi_probe(struct platform_device *pdev)
 	int ret = 0, num_cs, irq;
 	dma_cap_mask_t mask;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*qspi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*qspi));
 	if (!host)
 		return -ENOMEM;
 
@@ -773,10 +775,10 @@ static int ti_qspi_probe(struct platform_device *pdev)
 	host->setup = ti_qspi_setup;
 	host->auto_runtime_pm = true;
 	host->transfer_one_message = ti_qspi_start_transfer_one;
-	host->dev.of_node = pdev->dev.of_node;
 	host->bits_per_word_mask = SPI_BPW_MASK(32) | SPI_BPW_MASK(16) |
 				   SPI_BPW_MASK(8);
 	host->mem_ops = &ti_qspi_mem_ops;
+	host->mem_caps = &ti_qspi_mem_caps;
 
 	if (!of_property_read_u32(np, "num-cs", &num_cs))
 		host->num_chipselect = num_cs;
@@ -791,8 +793,7 @@ static int ti_qspi_probe(struct platform_device *pdev)
 		r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 		if (r == NULL) {
 			dev_err(&pdev->dev, "missing platform data\n");
-			ret = -ENODEV;
-			goto free_host;
+			return -ENODEV;
 		}
 	}
 
@@ -810,36 +811,22 @@ static int ti_qspi_probe(struct platform_device *pdev)
 		qspi->mmap_size = resource_size(res_mmap);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = irq;
-		goto free_host;
-	}
+	if (irq < 0)
+		return irq;
 
 	mutex_init(&qspi->list_lock);
 
 	qspi->base = devm_ioremap_resource(&pdev->dev, r);
-	if (IS_ERR(qspi->base)) {
-		ret = PTR_ERR(qspi->base);
-		goto free_host;
-	}
+	if (IS_ERR(qspi->base))
+		return PTR_ERR(qspi->base);
 
 
-	if (of_property_read_bool(np, "syscon-chipselects")) {
+	if (of_property_present(np, "syscon-chipselects")) {
 		qspi->ctrl_base =
-		syscon_regmap_lookup_by_phandle(np,
-						"syscon-chipselects");
-		if (IS_ERR(qspi->ctrl_base)) {
-			ret = PTR_ERR(qspi->ctrl_base);
-			goto free_host;
-		}
-		ret = of_property_read_u32_index(np,
-						 "syscon-chipselects",
-						 1, &qspi->ctrl_reg);
-		if (ret) {
-			dev_err(&pdev->dev,
-				"couldn't get ctrl_mod reg index\n");
-			goto free_host;
-		}
+			syscon_regmap_lookup_by_phandle_args(np, "syscon-chipselects",
+							     1, &qspi->ctrl_reg);
+		if (IS_ERR(qspi->ctrl_base))
+			return PTR_ERR(qspi->ctrl_base);
 	}
 
 	qspi->fclk = devm_clk_get(&pdev->dev, "fck");
@@ -863,7 +850,6 @@ static int ti_qspi_probe(struct platform_device *pdev)
 		dev_err(qspi->dev,
 			"No Rx DMA available, trying mmap mode\n");
 		qspi->rx_chan = NULL;
-		ret = 0;
 		goto no_dma;
 	}
 	qspi->rx_bb_addr = dma_alloc_coherent(qspi->dev,
@@ -874,6 +860,7 @@ static int ti_qspi_probe(struct platform_device *pdev)
 		dev_err(qspi->dev,
 			"dma_alloc_coherent failed, using PIO mode\n");
 		dma_release_channel(qspi->rx_chan);
+		qspi->rx_chan = NULL;
 		goto no_dma;
 	}
 	host->dma_rx = qspi->rx_chan;
@@ -895,29 +882,25 @@ no_dma:
 	qspi->mmap_enabled = false;
 	qspi->current_cs = -1;
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
-	if (!ret)
-		return 0;
+	ret = spi_register_controller(host);
+	if (ret)
+		goto err_free_dma;
 
+	return 0;
+
+err_free_dma:
 	ti_qspi_dma_cleanup(qspi);
 
 	pm_runtime_disable(&pdev->dev);
-free_host:
-	spi_controller_put(host);
+
 	return ret;
 }
 
 static void ti_qspi_remove(struct platform_device *pdev)
 {
 	struct ti_qspi *qspi = platform_get_drvdata(pdev);
-	int rc;
 
-	rc = spi_controller_suspend(qspi->host);
-	if (rc) {
-		dev_alert(&pdev->dev, "spi_controller_suspend() failed (%pe)\n",
-			  ERR_PTR(rc));
-		return;
-	}
+	spi_unregister_controller(qspi->host);
 
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
@@ -931,7 +914,7 @@ static const struct dev_pm_ops ti_qspi_pm_ops = {
 
 static struct platform_driver ti_qspi_driver = {
 	.probe	= ti_qspi_probe,
-	.remove_new = ti_qspi_remove,
+	.remove = ti_qspi_remove,
 	.driver = {
 		.name	= "ti-qspi",
 		.pm =   &ti_qspi_pm_ops,

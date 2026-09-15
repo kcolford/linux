@@ -29,12 +29,13 @@
 
 #include "qxl_drv.h"
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/vgaarb.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm.h>
-#include <drm/drm_aperture.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_ttm.h>
@@ -43,16 +44,22 @@
 #include <drm/drm_module.h>
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_prime.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
 #include "qxl_object.h"
 
 static const struct pci_device_id pciidlist[] = {
-	{ 0x1b36, 0x100, PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_DISPLAY_VGA << 8,
-	  0xffff00, 0 },
-	{ 0x1b36, 0x100, PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_DISPLAY_OTHER << 8,
-	  0xffff00, 0 },
-	{ 0, 0, 0 },
+	{
+		PCI_DEVICE(0x1b36, 0x0100),
+		.class = PCI_CLASS_DISPLAY_VGA << 8,
+		.class_mask = 0xffff00
+	}, {
+		PCI_DEVICE(0x1b36, 0x0100),
+		.class = PCI_CLASS_DISPLAY_OTHER << 8,
+		.class_mask = 0xffff00
+	},
+	{ },
 };
 MODULE_DEVICE_TABLE(pci, pciidlist);
 
@@ -91,7 +98,7 @@ qxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (ret)
 		return ret;
 
-	ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &qxl_driver);
+	ret = aperture_remove_conflicting_pci_devices(pdev, qxl_driver.name);
 	if (ret)
 		goto disable_pci;
 
@@ -116,12 +123,13 @@ qxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* Complete initialization. */
 	ret = drm_dev_register(&qdev->ddev, ent->driver_data);
 	if (ret)
-		goto modeset_cleanup;
+		goto poll_fini;
 
-	drm_fbdev_ttm_setup(&qdev->ddev, 32);
+	drm_client_setup(&qdev->ddev, NULL);
 	return 0;
 
-modeset_cleanup:
+poll_fini:
+	drm_kms_helper_poll_fini(&qdev->ddev);
 	qxl_modeset_fini(qdev);
 unload:
 	qxl_device_fini(qdev);
@@ -152,6 +160,7 @@ qxl_pci_remove(struct pci_dev *pdev)
 {
 	struct drm_device *dev = pci_get_drvdata(pdev);
 
+	drm_kms_helper_poll_fini(dev);
 	drm_dev_unregister(dev);
 	drm_atomic_helper_shutdown(dev);
 	if (pci_is_vga(pdev) && pdev->revision < 5)
@@ -293,12 +302,12 @@ static struct drm_driver qxl_driver = {
 	.debugfs_init = qxl_debugfs_init,
 #endif
 	.gem_prime_import_sg_table = qxl_gem_prime_import_sg_table,
+	DRM_FBDEV_TTM_DRIVER_OPS,
 	.fops = &qxl_fops,
 	.ioctls = qxl_ioctls,
 	.num_ioctls = ARRAY_SIZE(qxl_ioctls),
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = 0,
 	.minor = 1,
 	.patchlevel = 0,

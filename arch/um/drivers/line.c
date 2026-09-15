@@ -383,6 +383,7 @@ int setup_one_line(struct line *lines, int n, char *init,
 			parse_chan_pair(NULL, line, n, opts, error_out);
 			err = 0;
 		}
+		*error_out = "configured as 'none'";
 	} else {
 		char *new = kstrdup(init, GFP_KERNEL);
 		if (!new) {
@@ -406,6 +407,7 @@ int setup_one_line(struct line *lines, int n, char *init,
 			}
 		}
 		if (err) {
+			*error_out = "failed to parse channel pair";
 			line->init_str = NULL;
 			line->valid = 0;
 			kfree(new);
@@ -670,7 +672,7 @@ void register_winch_irq(int fd, int tty_fd, int pid, struct tty_port *port,
 {
 	struct winch *winch;
 
-	winch = kmalloc(sizeof(*winch), GFP_KERNEL);
+	winch = kmalloc_obj(*winch);
 	if (winch == NULL) {
 		printk(KERN_ERR "register_winch_irq - kmalloc failed\n");
 		goto cleanup;

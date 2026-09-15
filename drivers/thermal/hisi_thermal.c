@@ -412,8 +412,8 @@ static int hi3660_thermal_probe(struct hisi_thermal_data *data)
 
 	data->nr_sensors = 1;
 
-	data->sensor = devm_kzalloc(dev, sizeof(*data->sensor) *
-				    data->nr_sensors, GFP_KERNEL);
+	data->sensor = devm_kcalloc(dev, data->nr_sensors,
+				    sizeof(*data->sensor), GFP_KERNEL);
 	if (!data->sensor)
 		return -ENOMEM;
 
@@ -465,11 +465,22 @@ static irqreturn_t hisi_thermal_alarm_irq_thread(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
+static int hisi_trip_walk_cb(struct thermal_trip *trip, void *arg)
+{
+	struct hisi_thermal_sensor *sensor = arg;
+
+	if (trip->type != THERMAL_TRIP_PASSIVE)
+		return 0;
+
+	sensor->thres_temp = trip->temperature;
+	/* Return nonzero to terminate the search. */
+	return 1;
+}
+
 static int hisi_thermal_register_sensor(struct platform_device *pdev,
 					struct hisi_thermal_sensor *sensor)
 {
-	int ret, i;
-	struct thermal_trip trip;
+	int ret;
 
 	sensor->tzd = devm_thermal_of_zone_register(&pdev->dev,
 						    sensor->id, sensor,
@@ -482,15 +493,7 @@ static int hisi_thermal_register_sensor(struct platform_device *pdev,
 		return ret;
 	}
 
-	for (i = 0; i < thermal_zone_get_num_trips(sensor->tzd); i++) {
-
-		thermal_zone_get_trip(sensor->tzd, i, &trip);
-
-		if (trip.type == THERMAL_TRIP_PASSIVE) {
-			sensor->thres_temp = trip.temperature;
-			break;
-		}
-	}
+	thermal_zone_for_each_trip(sensor->tzd, hisi_trip_walk_cb, sensor);
 
 	return 0;
 }
@@ -575,10 +578,8 @@ static int hisi_thermal_probe(struct platform_device *pdev)
 						hisi_thermal_alarm_irq_thread,
 						IRQF_ONESHOT, sensor->irq_name,
 						sensor);
-		if (ret < 0) {
-			dev_err(dev, "Failed to request alarm irq: %d\n", ret);
+		if (ret < 0)
 			return ret;
-		}
 
 		ret = data->ops->enable_sensor(sensor);
 		if (ret) {
@@ -634,10 +635,10 @@ static struct platform_driver hisi_thermal_driver = {
 	.driver = {
 		.name		= "hisi_thermal",
 		.pm		= pm_sleep_ptr(&hisi_thermal_pm_ops),
-		.of_match_table = of_hisi_thermal_match,
+		.of_match_table	= of_hisi_thermal_match,
 	},
 	.probe	= hisi_thermal_probe,
-	.remove_new = hisi_thermal_remove,
+	.remove	= hisi_thermal_remove,
 };
 
 module_platform_driver(hisi_thermal_driver);

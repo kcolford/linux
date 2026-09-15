@@ -279,7 +279,6 @@ static const struct file_operations phantom_file_ops = {
 	.unlocked_ioctl = phantom_ioctl,
 	.compat_ioctl = phantom_compat_ioctl,
 	.poll = phantom_poll,
-	.llseek = no_llseek,
 };
 
 static irqreturn_t phantom_isr(int irq, void *data)
@@ -363,7 +362,7 @@ static int phantom_probe(struct pci_dev *pdev,
 	}
 
 	retval = -ENOMEM;
-	pht = kzalloc(sizeof(*pht), GFP_KERNEL);
+	pht = kzalloc_obj(*pht);
 	if (pht == NULL) {
 		dev_err(&pdev->dev, "unable to allocate device\n");
 		goto err_reg;
@@ -482,10 +481,10 @@ static int __maybe_unused phantom_resume(struct device *dev_d)
 }
 
 static struct pci_device_id phantom_pci_tbl[] = {
-	{ .vendor = PCI_VENDOR_ID_PLX, .device = PCI_DEVICE_ID_PLX_9050,
-	  .subvendor = PCI_VENDOR_ID_PLX, .subdevice = PCI_DEVICE_ID_PLX_9050,
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+			 PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050),
 	  .class = PCI_CLASS_BRIDGE_OTHER << 8, .class_mask = 0xffff00 },
-	{ 0, }
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, phantom_pci_tbl);
 

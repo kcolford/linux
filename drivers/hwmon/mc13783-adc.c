@@ -11,7 +11,6 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/hwmon.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -315,7 +314,7 @@ static const struct platform_device_id mc13783_adc_idtable[] = {
 MODULE_DEVICE_TABLE(platform, mc13783_adc_idtable);
 
 static struct platform_driver mc13783_adc_driver = {
-	.remove_new	= mc13783_adc_remove,
+	.remove		= mc13783_adc_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
 	},

@@ -31,6 +31,7 @@
 #include <linux/reset.h>
 #include <linux/thermal.h>
 
+#include <dt-bindings/thermal/tegra114-soctherm.h>
 #include <dt-bindings/thermal/tegra124-soctherm.h>
 
 #include "../thermal_core.h"
@@ -357,6 +358,12 @@ struct soctherm_oc_irq_chip_data {
 
 static struct soctherm_oc_irq_chip_data soc_irq_cdata;
 
+/* Ensure that TEGRA114_* and TEGRA124_* counterparts are equal */
+static_assert(TEGRA114_SOCTHERM_SENSOR_CPU == TEGRA124_SOCTHERM_SENSOR_CPU);
+static_assert(TEGRA114_SOCTHERM_SENSOR_MEM == TEGRA124_SOCTHERM_SENSOR_MEM);
+static_assert(TEGRA114_SOCTHERM_SENSOR_GPU == TEGRA124_SOCTHERM_SENSOR_GPU);
+static_assert(TEGRA114_SOCTHERM_SENSOR_PLLX == TEGRA124_SOCTHERM_SENSOR_PLLX);
+
 /**
  * ccroc_writel() - writes a value to a CCROC register
  * @ts: pointer to a struct tegra_soctherm
@@ -682,24 +689,25 @@ static const struct thermal_zone_device_ops tegra_of_thermal_ops = {
 	.set_trips = tegra_thermctl_set_trips,
 };
 
-static int get_hot_temp(struct thermal_zone_device *tz, int *trip_id, int *temp)
+static int get_hot_trip_cb(struct thermal_trip *trip, void *arg)
 {
-	int i, ret;
-	struct thermal_trip trip;
+	const struct thermal_trip **trip_ret = arg;
 
-	for (i = 0; i < thermal_zone_get_num_trips(tz); i++) {
+	if (trip->type != THERMAL_TRIP_HOT)
+		return 0;
 
-		ret = thermal_zone_get_trip(tz, i, &trip);
-		if (ret)
-			return -EINVAL;
+	*trip_ret = trip;
+	/* Return nonzero to terminate the search. */
+	return 1;
+}
 
-		if (trip.type == THERMAL_TRIP_HOT) {
-			*trip_id = i;
-			return 0;
-		}
-	}
+static const struct thermal_trip *get_hot_trip(struct thermal_zone_device *tz)
+{
+	const struct thermal_trip *trip = NULL;
 
-	return -EINVAL;
+	thermal_zone_for_each_trip(tz, get_hot_trip_cb, &trip);
+
+	return trip;
 }
 
 /**
@@ -731,8 +739,9 @@ static int tegra_soctherm_set_hwtrips(struct device *dev,
 				      struct thermal_zone_device *tz)
 {
 	struct tegra_soctherm *ts = dev_get_drvdata(dev);
+	const struct thermal_trip *hot_trip;
 	struct soctherm_throt_cfg *stc;
-	int i, trip, temperature, ret;
+	int i, temperature, ret;
 
 	/* Get thermtrips. If missing, try to get critical trips. */
 	temperature = tsensor_group_thermtrip_get(ts, sg->id);
@@ -749,8 +758,8 @@ static int tegra_soctherm_set_hwtrips(struct device *dev,
 	dev_info(dev, "thermtrip: will shut down when %s reaches %d mC\n",
 		 sg->name, temperature);
 
-	ret = get_hot_temp(tz, &trip, &temperature);
-	if (ret) {
+	hot_trip = get_hot_trip(tz);
+	if (!hot_trip) {
 		dev_info(dev, "throttrip: %s: missing hot temperature\n",
 			 sg->name);
 		return 0;
@@ -763,7 +772,7 @@ static int tegra_soctherm_set_hwtrips(struct device *dev,
 			continue;
 
 		cdev = ts->throt_cfgs[i].cdev;
-		if (get_thermal_instance(tz, cdev, trip))
+		if (thermal_trip_is_bound_to_cdev(tz, hot_trip, cdev))
 			stc = find_throttle_cfg_by_name(ts, cdev->type);
 		else
 			continue;
@@ -1204,7 +1213,7 @@ static const struct irq_domain_ops soctherm_oc_domain_ops = {
 /**
  * soctherm_oc_int_init() - Initial enabling of the over
  * current interrupts
- * @np:	The devicetree node for soctherm
+ * @fwnode:	The devicetree node for soctherm
  * @num_irqs:	The number of new interrupt requests
  *
  * Sets the over current interrupt request chip data
@@ -1213,7 +1222,7 @@ static const struct irq_domain_ops soctherm_oc_domain_ops = {
  * -ENOMEM (out of memory), or irq_base if the function failed to
  * allocate the irqs
  */
-static int soctherm_oc_int_init(struct device_node *np, int num_irqs)
+static int soctherm_oc_int_init(struct fwnode_handle *fwnode, int num_irqs)
 {
 	if (!num_irqs) {
 		pr_info("%s(): OC interrupts are not enabled\n", __func__);
@@ -1232,10 +1241,8 @@ static int soctherm_oc_int_init(struct device_node *np, int num_irqs)
 	soc_irq_cdata.irq_chip.irq_set_type = soctherm_oc_irq_set_type;
 	soc_irq_cdata.irq_chip.irq_set_wake = NULL;
 
-	soc_irq_cdata.domain = irq_domain_add_linear(np, num_irqs,
-						     &soctherm_oc_domain_ops,
-						     &soc_irq_cdata);
-
+	soc_irq_cdata.domain = irq_domain_create_linear(fwnode, num_irqs, &soctherm_oc_domain_ops,
+							&soc_irq_cdata);
 	if (!soc_irq_cdata.domain) {
 		pr_err("%s: Failed to create IRQ domain\n", __func__);
 		return -ENOMEM;
@@ -1492,6 +1499,13 @@ static int soctherm_clk_enable(struct platform_device *pdev, bool enable)
 	return 0;
 }
 
+static void soctherm_clk_disable(void *data)
+{
+	struct platform_device *pdev = data;
+
+	soctherm_clk_enable(pdev, false);
+}
+
 static int throt_get_cdev_max_state(struct thermal_cooling_device *cdev,
 				    unsigned long *max_state)
 {
@@ -1649,7 +1663,7 @@ static void soctherm_init_hw_throt_cdev(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct tegra_soctherm *ts = dev_get_drvdata(dev);
-	struct device_node *np_stc, *np_stcc;
+	struct device_node *np_stc;
 	const char *name;
 	int i;
 
@@ -1666,7 +1680,7 @@ static void soctherm_init_hw_throt_cdev(struct platform_device *pdev)
 		return;
 	}
 
-	for_each_child_of_node(np_stc, np_stcc) {
+	for_each_child_of_node_scoped(np_stc, np_stcc) {
 		struct soctherm_throt_cfg *stc;
 		struct thermal_cooling_device *tcd;
 		int err;
@@ -1681,7 +1695,6 @@ static void soctherm_init_hw_throt_cdev(struct platform_device *pdev)
 
 		if (stc->init) {
 			dev_err(dev, "throttle-cfg: %s: redefined!\n", name);
-			of_node_put(np_stcc);
 			break;
 		}
 
@@ -1694,9 +1707,9 @@ static void soctherm_init_hw_throt_cdev(struct platform_device *pdev)
 			stc->init = true;
 		} else {
 
-			tcd = thermal_of_cooling_device_register(np_stcc,
-							 (char *)name, ts,
-							 &throt_cooling_ops);
+			tcd = devm_thermal_of_child_cooling_device_register(dev, np_stcc,
+									    (char *)name, ts,
+									    &throt_cooling_ops);
 			if (IS_ERR_OR_NULL(tcd)) {
 				dev_err(dev,
 					"throttle-cfg: %s: failed to register cooling device\n",
@@ -1967,10 +1980,9 @@ static void tegra_soctherm_throttle(struct device *dev)
 static int soctherm_interrupts_init(struct platform_device *pdev,
 				    struct tegra_soctherm *tegra)
 {
-	struct device_node *np = pdev->dev.of_node;
 	int ret;
 
-	ret = soctherm_oc_int_init(np, TEGRA_SOC_OC_IRQ_MAX);
+	ret = soctherm_oc_int_init(dev_fwnode(&pdev->dev), TEGRA_SOC_OC_IRQ_MAX);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "soctherm_oc_int_init failed\n");
 		return ret;
@@ -1995,10 +2007,8 @@ static int soctherm_interrupts_init(struct platform_device *pdev,
 					IRQF_ONESHOT,
 					dev_name(&pdev->dev),
 					tegra);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "request_irq 'thermal_irq' failed.\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	ret = devm_request_threaded_irq(&pdev->dev,
 					tegra->edp_irq,
@@ -2007,10 +2017,8 @@ static int soctherm_interrupts_init(struct platform_device *pdev,
 					IRQF_ONESHOT,
 					"soctherm_edp",
 					tegra);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "request_irq 'edp_irq' failed.\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	return 0;
 }
@@ -2047,6 +2055,12 @@ static void soctherm_init(struct platform_device *pdev)
 }
 
 static const struct of_device_id tegra_soctherm_of_match[] = {
+#ifdef CONFIG_ARCH_TEGRA_114_SOC
+	{
+		.compatible = "nvidia,tegra114-soctherm",
+		.data = &tegra114_soctherm,
+	},
+#endif
 #ifdef CONFIG_ARCH_TEGRA_124_SOC
 	{
 		.compatible = "nvidia,tegra124-soctherm",
@@ -2164,6 +2178,10 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
+	err = devm_add_action_or_reset(&pdev->dev, soctherm_clk_disable, pdev);
+	if (err)
+		return err;
+
 	soctherm_thermtrips_parse(pdev);
 
 	soctherm_init_hw_throt_cdev(pdev);
@@ -2173,10 +2191,8 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	for (i = 0; i < soc->num_ttgs; ++i) {
 		struct tegra_thermctl_zone *zone =
 			devm_kzalloc(&pdev->dev, sizeof(*zone), GFP_KERNEL);
-		if (!zone) {
-			err = -ENOMEM;
-			goto disable_clocks;
-		}
+		if (!zone)
+			return -ENOMEM;
 
 		zone->reg = tegra->regs + soc->ttgs[i]->sensor_temp_offset;
 		zone->dev = &pdev->dev;
@@ -2190,7 +2206,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 			err = PTR_ERR(z);
 			dev_err(&pdev->dev, "failed to register sensor: %d\n",
 				err);
-			goto disable_clocks;
+			return err;
 		}
 
 		zone->tz = z;
@@ -2199,7 +2215,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 		/* Configure hw trip points */
 		err = tegra_soctherm_set_hwtrips(&pdev->dev, soc->ttgs[i], z);
 		if (err)
-			goto disable_clocks;
+			return err;
 	}
 
 	err = soctherm_interrupts_init(pdev, tegra);
@@ -2207,11 +2223,6 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	soctherm_debug_init(pdev);
 
 	return 0;
-
-disable_clocks:
-	soctherm_clk_enable(pdev, false);
-
-	return err;
 }
 
 static void tegra_soctherm_remove(struct platform_device *pdev)
@@ -2219,8 +2230,6 @@ static void tegra_soctherm_remove(struct platform_device *pdev)
 	struct tegra_soctherm *tegra = platform_get_drvdata(pdev);
 
 	debugfs_remove_recursive(tegra->debugfs_dir);
-
-	soctherm_clk_enable(pdev, false);
 }
 
 static int __maybe_unused soctherm_suspend(struct device *dev)
@@ -2267,7 +2276,7 @@ static SIMPLE_DEV_PM_OPS(tegra_soctherm_pm, soctherm_suspend, soctherm_resume);
 
 static struct platform_driver tegra_soctherm_driver = {
 	.probe = tegra_soctherm_probe,
-	.remove_new = tegra_soctherm_remove,
+	.remove = tegra_soctherm_remove,
 	.driver = {
 		.name = "tegra_soctherm",
 		.pm = &tegra_soctherm_pm,

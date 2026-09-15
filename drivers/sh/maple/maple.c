@@ -187,7 +187,7 @@ static struct mapleq *maple_allocq(struct maple_device *mdev)
 {
 	struct mapleq *mq;
 
-	mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+	mq = kzalloc_obj(*mq);
 	if (!mq)
 		goto failed_nomem;
 
@@ -215,7 +215,7 @@ static struct maple_device *maple_alloc_dev(int port, int unit)
 	/* zero this out to avoid kobj subsystem
 	* thinking it has already been registered */
 
-	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	mdev = kzalloc_obj(*mdev);
 	if (!mdev)
 		return NULL;
 
@@ -747,9 +747,9 @@ static int maple_get_dma_buffer(void)
 }
 
 static int maple_match_bus_driver(struct device *devptr,
-				  struct device_driver *drvptr)
+				  const struct device_driver *drvptr)
 {
-	struct maple_driver *maple_drv = to_maple_driver(drvptr);
+	const struct maple_driver *maple_drv = to_maple_driver(drvptr);
 	struct maple_device *maple_dev = to_maple_dev(devptr);
 
 	/* Trap empty port case */

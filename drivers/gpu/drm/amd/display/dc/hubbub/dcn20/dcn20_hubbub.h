@@ -96,6 +96,7 @@ struct dcn20_hubbub {
 	unsigned int det1_size;
 	unsigned int det2_size;
 	unsigned int det3_size;
+	bool allow_sdpif_rate_limit_when_cstate_req;
 };
 
 void hubbub2_construct(struct dcn20_hubbub *hubbub,
@@ -139,5 +140,8 @@ void hubbub2_wm_read_state(struct hubbub *hubbub,
 
 void hubbub2_read_state(struct hubbub *hubbub,
 		struct dcn_hubbub_state *hubbub_state);
+
+/* Extract bits [47:24] of a physical address for hardware register fields */
+#define ADDR_HI24(a)  ((uint32_t)((uint64_t)(a) >> 24))
 
 #endif

@@ -19,11 +19,11 @@
 
 
 static inline struct nilfs_inode *
-nilfs_ifile_map_inode(struct inode *ifile, ino_t ino, struct buffer_head *ibh)
+nilfs_ifile_map_inode(struct inode *ifile, u64 ino, struct buffer_head *ibh)
 {
-	void *kaddr = kmap_local_page(ibh->b_page);
+	size_t __offset_in_folio = nilfs_palloc_entry_offset(ifile, ino, ibh);
 
-	return nilfs_palloc_block_get_entry(ifile, ino, ibh, kaddr);
+	return kmap_local_folio(ibh->b_folio, __offset_in_folio);
 }
 
 static inline void nilfs_ifile_unmap_inode(struct nilfs_inode *raw_inode)
@@ -31,9 +31,11 @@ static inline void nilfs_ifile_unmap_inode(struct nilfs_inode *raw_inode)
 	kunmap_local(raw_inode);
 }
 
-int nilfs_ifile_create_inode(struct inode *, ino_t *, struct buffer_head **);
-int nilfs_ifile_delete_inode(struct inode *, ino_t);
-int nilfs_ifile_get_inode_block(struct inode *, ino_t, struct buffer_head **);
+int nilfs_ifile_create_inode(struct inode *ifile, u64 *out_ino,
+			struct buffer_head **out_bh);
+int nilfs_ifile_delete_inode(struct inode *ifile, u64 ino);
+int nilfs_ifile_get_inode_block(struct inode *ifile, u64 ino,
+				struct buffer_head **out_bh);
 
 int nilfs_ifile_count_free_inodes(struct inode *, u64 *, u64 *);
 

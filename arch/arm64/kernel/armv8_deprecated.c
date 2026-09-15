@@ -507,7 +507,7 @@ static int update_insn_emulation_mode(struct insn_emulation *insn,
 	return ret;
 }
 
-static int emulation_proc_handler(struct ctl_table *table, int write,
+static int emulation_proc_handler(const struct ctl_table *table, int write,
 				  void *buffer, size_t *lenp,
 				  loff_t *ppos)
 {
@@ -610,6 +610,20 @@ static int __init armv8_deprecated_init(void)
 	}
 
 #endif
+
+#ifdef CONFIG_SWP_EMULATION
+	/*
+	 * The purpose of supporting LSUI is to eliminate PAN toggling. CPUs
+	 * that support LSUI are unlikely to support a 32-bit runtime. Rather
+	 * than emulating the SWP instruction using LSUI instructions, simply
+	 * disable SWP emulation.
+	 */
+	if (cpus_have_final_cap(ARM64_HAS_LSUI)) {
+		insn_swp.status = INSN_UNAVAILABLE;
+		pr_info("swp/swpb instruction emulation is not supported on this system\n");
+	}
+#endif
+
 	for (int i = 0; i < ARRAY_SIZE(insn_emulations); i++) {
 		struct insn_emulation *ie = insn_emulations[i];
 

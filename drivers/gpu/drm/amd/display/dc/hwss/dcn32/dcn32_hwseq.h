@@ -54,12 +54,10 @@ bool dcn32_set_input_transfer_func(struct dc *dc,
 				struct pipe_ctx *pipe_ctx,
 				const struct dc_plane_state *plane_state);
 
-bool dcn32_set_mpc_shaper_3dlut(
-	struct pipe_ctx *pipe_ctx, const struct dc_stream_state *stream);
+bool dcn32_set_mpc_shaper_3dlut(struct dpp *dpp_base, struct mpc *mpc,
+	int mpcc_id, const struct dc_stream_state *stream);
 
-bool dcn32_set_output_transfer_func(struct dc *dc,
-				struct pipe_ctx *pipe_ctx,
-				const struct dc_stream_state *stream);
+bool dcn32_set_output_transfer_func(struct set_output_transfer_func_params *params);
 
 void dcn32_init_hw(struct dc *dc);
 
@@ -75,7 +73,7 @@ void dcn32_update_dsc_on_stream(struct pipe_ctx *pipe_ctx, bool enable);
 
 unsigned int dcn32_calculate_dccg_k1_k2_values(struct pipe_ctx *pipe_ctx, unsigned int *k1_div, unsigned int *k2_div);
 
-void dcn32_resync_fifo_dccg_dio(struct dce_hwseq *hws, struct dc *dc, struct dc_state *context);
+void dcn32_resync_fifo_dccg_dio(struct dce_hwseq *hws, struct dc *dc, struct dc_state *context, unsigned int current_pipe_idx);
 
 void dcn32_subvp_pipe_control_lock(struct dc *dc,
 		struct dc_state *context,
@@ -119,11 +117,6 @@ void dcn32_init_blank(
 		struct dc *dc,
 		struct timing_generator *tg);
 
-void dcn32_blank_phantom(struct dc *dc,
-		struct timing_generator *tg,
-		int width,
-		int height);
-
 bool dcn32_is_pipe_topology_transition_seamless(struct dc *dc,
 		const struct dc_state *cur_ctx,
 		const struct dc_state *new_ctx);
@@ -133,4 +126,8 @@ void dcn32_prepare_bandwidth(struct dc *dc,
 
 void dcn32_interdependent_update_lock(struct dc *dc,
 		struct dc_state *context, bool lock);
+
+void dcn32_program_outstanding_updates(struct dc *dc,
+		struct dc_state *context);
+
 #endif /* __DC_HWSS_DCN32_H__ */

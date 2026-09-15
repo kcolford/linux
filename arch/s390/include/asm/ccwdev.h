@@ -10,7 +10,7 @@
 #define _S390_CCWDEV_H_
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/ccw.h>
 #include <asm/chsc.h>
 #include <asm/fcx.h>
 #include <asm/irq.h>
@@ -210,7 +210,7 @@ extern void ccw_device_get_id(struct ccw_device *, struct ccw_dev_id *);
 #define get_ccwdev_lock(x) (x)->ccwlock
 
 #define to_ccwdev(n) container_of(n, struct ccw_device, dev)
-#define to_ccwdrv(n) container_of(n, struct ccw_driver, driver)
+#define to_ccwdrv(n) container_of_const(n, struct ccw_driver, driver)
 
 extern struct ccw_device *ccw_device_create_console(struct ccw_driver *);
 extern void ccw_device_destroy_console(struct ccw_device *);

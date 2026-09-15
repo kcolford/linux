@@ -160,6 +160,9 @@ static struct clk_plt *plt_clk_register(struct platform_device *pdev, int id,
 		return ERR_PTR(-ENOMEM);
 
 	init.name =  kasprintf(GFP_KERNEL, "%s_%d", PLT_CLK_NAME_BASE, id);
+	if (!init.name)
+		return ERR_PTR(-ENOMEM);
+
 	init.ops = &plt_clk_ops;
 	init.flags = 0;
 	init.parent_names = parent_names;
@@ -373,6 +376,6 @@ static struct platform_driver plt_clk_driver = {
 		.name = "clk-pmc-atom",
 	},
 	.probe = plt_clk_probe,
-	.remove_new = plt_clk_remove,
+	.remove = plt_clk_remove,
 };
 builtin_platform_driver(plt_clk_driver);

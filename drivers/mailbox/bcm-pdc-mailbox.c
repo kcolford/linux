@@ -158,10 +158,6 @@ enum pdc_hw {
 	PDC_HW		/* PDC/MDE hardware (i.e. Northstar 2, Pegasus) */
 };
 
-struct pdc_dma_map {
-	void *ctx;          /* opaque context associated with frame */
-};
-
 /* dma descriptor */
 struct dma64dd {
 	u32 ctrl1;      /* misc control bits */
@@ -1407,11 +1403,8 @@ static int pdc_interrupts_init(struct pdc_state *pdcs)
 
 	err = devm_request_irq(dev, pdcs->pdc_irq, pdc_irq_handler, 0,
 			       dev_name(dev), dev);
-	if (err) {
-		dev_err(dev, "IRQ %u request failed with err %d\n",
-			pdcs->pdc_irq, err);
+	if (err)
 		return err;
-	}
 	return PDC_SUCCESS;
 }
 
@@ -1622,7 +1615,7 @@ static void pdc_remove(struct platform_device *pdev)
 
 static struct platform_driver pdc_mbox_driver = {
 	.probe = pdc_probe,
-	.remove_new = pdc_remove,
+	.remove = pdc_remove,
 	.driver = {
 		   .name = "brcm-iproc-pdc-mbox",
 		   .of_match_table = pdc_mbox_of_match,

@@ -6,6 +6,7 @@
 // Authors: David Yang <yangxiaohua@everest-semi.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
@@ -25,6 +26,7 @@ struct es8326_priv {
 	struct snd_soc_component *component;
 	struct delayed_work jack_detect_work;
 	struct delayed_work button_press_work;
+	struct delayed_work capture_pop_work;
 	struct snd_soc_jack *jack;
 	int irq;
 	/* The lock protects the situation that an irq is generated
@@ -194,6 +196,8 @@ static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(adc_pga_tlv, 0, 600, 0);
 static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(softramp_rate, 0, 100, 0);
 static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(drc_target_tlv, -3200, 200, 0);
 static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(drc_recovery_tlv, -125, 250, 0);
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(dre_gain_tlv, -9550, 400, 0);
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(dre_gate_tlv, -9600, 600, 0);
 
 static const char *const winsize[] = {
 	"0.25db/2  LRCK",
@@ -226,6 +230,8 @@ static const char *const hp_spkvol_switch[] = {
 
 static const struct soc_enum dacpol =
 	SOC_ENUM_SINGLE(ES8326_DAC_DSM, 4, 4, dacpol_txt);
+static const struct soc_enum dre_winsize =
+	SOC_ENUM_SINGLE(ES8326_ADC_DRE, 0, 16, winsize);
 static const struct soc_enum alc_winsize =
 	SOC_ENUM_SINGLE(ES8326_ADC_RAMPRATE, 4, 16, winsize);
 static const struct soc_enum drc_winsize =
@@ -245,7 +251,18 @@ static const struct snd_kcontrol_new es8326_snd_controls[] = {
 			 adc_vol_tlv),
 	SOC_DOUBLE_TLV("ADC PGA Volume", ES8326_ADC_SCALE, 4, 0, 5, 0, adc_pga_tlv),
 	SOC_SINGLE_TLV("ADC PGA Gain Volume", ES8326_PGAGAIN, 0, 10, 0, adc_analog_pga_tlv),
+	SOC_SINGLE("ADC PGA SE Switch", ES8326_PGAGAIN, 7, 1, 0),
 	SOC_SINGLE_TLV("ADC Ramp Rate", ES8326_ADC_RAMPRATE, 0, 0x0f, 0, softramp_rate),
+	SOC_SINGLE("ADC4 DRE Switch", ES8326_ADC_DRE, 4, 1, 0),
+	SOC_SINGLE("ADC3 DRE Switch", ES8326_ADC_DRE, 5, 1, 0),
+	SOC_SINGLE("ADC2 DRE Switch", ES8326_ADC_DRE, 6, 1, 0),
+	SOC_SINGLE("ADC1 DRE Switch", ES8326_ADC_DRE, 7, 1, 0),
+	SOC_ENUM("DRE Winsize", dre_winsize),
+	SOC_SINGLE("DRE Gain Switch", ES8326_ADC_DRE_GAIN, 5, 1, 0),
+	SOC_SINGLE_TLV("DRE Gain Volume", ES8326_ADC_DRE_GAIN,
+			0, 0x1F, 0, dre_gain_tlv),
+	SOC_SINGLE_TLV("DRE Gate Volume", ES8326_ADC_DRE_GATE,
+			4, 0x07, 0, dre_gate_tlv),
 	SOC_SINGLE("ALC Capture Switch", ES8326_ALC_RECOVERY, 3, 1, 0),
 	SOC_SINGLE_TLV("ALC Capture Recovery Level", ES8326_ALC_LEVEL,
 			0, 4, 0, drc_recovery_tlv),
@@ -612,8 +629,13 @@ static int es8326_mute(struct snd_soc_dai *dai, int mute, int direction)
 			regmap_update_bits(es8326->regmap, ES8326_HP_DRIVER_REF,
 					0x30, 0x00);
 		} else {
+			cancel_delayed_work_sync(&es8326->capture_pop_work);
 			regmap_update_bits(es8326->regmap,  ES8326_ADC_MUTE,
 					0x0F, 0x0F);
+			if (es8326->version > ES8326_VERSION_B) {
+				regmap_update_bits(es8326->regmap, ES8326_VMIDSEL, 0x40, 0x40);
+				regmap_update_bits(es8326->regmap, ES8326_ANA_MICBIAS, 0x70, 0x30);
+			}
 		}
 	} else {
 		if (!es8326->calibrated) {
@@ -627,6 +649,8 @@ static int es8326_mute(struct snd_soc_dai *dai, int mute, int direction)
 			regmap_write(es8326->regmap, ES8326_HPR_OFFSET_INI, offset_r);
 			es8326->calibrated = true;
 		}
+		regmap_update_bits(es8326->regmap, ES8326_CLK_INV, 0xc0, 0x00);
+                regmap_update_bits(es8326->regmap, ES8326_CLK_MUX, 0x80, 0x00);
 		if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
 			regmap_update_bits(es8326->regmap, ES8326_DAC_DSM, 0x01, 0x01);
 			usleep_range(1000, 5000);
@@ -640,8 +664,13 @@ static int es8326_mute(struct snd_soc_dai *dai, int mute, int direction)
 					ES8326_MUTE_MASK, ~(ES8326_MUTE));
 		} else {
 			msleep(300);
-			regmap_update_bits(es8326->regmap,  ES8326_ADC_MUTE,
-					0x0F, 0x00);
+			if (es8326->version > ES8326_VERSION_B) {
+				regmap_update_bits(es8326->regmap, ES8326_ANA_MICBIAS, 0x70, 0x70);
+				regmap_update_bits(es8326->regmap, ES8326_VMIDSEL, 0x40, 0x00);
+			}
+
+			queue_delayed_work(system_dfl_wq, &es8326->capture_pop_work,
+				   msecs_to_jiffies(40));
 		}
 	}
 	return 0;
@@ -668,6 +697,10 @@ static int es8326_set_bias_level(struct snd_soc_component *codec,
 		regmap_write(es8326->regmap, ES8326_ANA_PDN, 0x00);
 		regmap_update_bits(es8326->regmap,  ES8326_CLK_CTL, 0x20, 0x20);
 		regmap_update_bits(es8326->regmap, ES8326_RESET, 0x02, 0x00);
+		if (es8326->version > ES8326_VERSION_B) {
+			regmap_update_bits(es8326->regmap, ES8326_VMIDSEL, 0x40, 0x40);
+			regmap_update_bits(es8326->regmap, ES8326_ANA_MICBIAS, 0x70, 0x30);
+		}
 		break;
 	case SND_SOC_BIAS_PREPARE:
 		break;
@@ -675,6 +708,12 @@ static int es8326_set_bias_level(struct snd_soc_component *codec,
 		regmap_write(es8326->regmap, ES8326_ANA_PDN, 0x3b);
 		regmap_update_bits(es8326->regmap, ES8326_CLK_CTL, 0x20, 0x00);
 		regmap_write(es8326->regmap, ES8326_SDINOUT1_IO, ES8326_IO_INPUT);
+		if (es8326->version > ES8326_VERSION_B) {
+			regmap_update_bits(es8326->regmap, ES8326_VMIDSEL, 0x40, 0x40);
+			regmap_update_bits(es8326->regmap, ES8326_ANA_MICBIAS, 0x70, 0x10);
+		}
+		regmap_update_bits(es8326->regmap, ES8326_CLK_INV, 0xc0, 0xc0);
+		regmap_update_bits(es8326->regmap, ES8326_CLK_MUX, 0x80, 0x80);
 		break;
 	case SND_SOC_BIAS_OFF:
 		clk_disable_unprepare(es8326->mclk);
@@ -717,7 +756,7 @@ static struct snd_soc_dai_driver es8326_dai = {
 
 static void es8326_enable_micbias(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	snd_soc_dapm_mutex_lock(dapm);
 	snd_soc_dapm_force_enable_pin_unlocked(dapm, "MICBIAS1");
@@ -728,13 +767,22 @@ static void es8326_enable_micbias(struct snd_soc_component *component)
 
 static void es8326_disable_micbias(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	snd_soc_dapm_mutex_lock(dapm);
 	snd_soc_dapm_disable_pin_unlocked(dapm, "MICBIAS1");
 	snd_soc_dapm_disable_pin_unlocked(dapm, "MICBIAS2");
 	snd_soc_dapm_sync_unlocked(dapm);
 	snd_soc_dapm_mutex_unlock(dapm);
+}
+
+static void es8326_capture_pop_handler(struct work_struct *work)
+{
+	struct es8326_priv *es8326 =
+		container_of(work, struct es8326_priv, capture_pop_work.work);
+
+	regmap_update_bits(es8326->regmap,  ES8326_ADC_MUTE,
+					0x0F, 0x00);
 }
 
 /*
@@ -755,7 +803,7 @@ static void es8326_jack_button_handler(struct work_struct *work)
 	if (!(es8326->jack->status & SND_JACK_HEADSET)) /* Jack unplugged */
 		return;
 
-	mutex_lock(&es8326->lock);
+	guard(mutex)(&es8326->lock);
 	iface = snd_soc_component_read(comp, ES8326_HPDET_STA);
 	switch (iface) {
 	case 0x93:
@@ -765,7 +813,10 @@ static void es8326_jack_button_handler(struct work_struct *work)
 	case 0x6f:
 	case 0x4b:
 		/* button volume up */
-		cur_button = SND_JACK_BTN_1;
+		if ((iface == 0x6f) && (es8326->version > ES8326_VERSION_B))
+			cur_button = SND_JACK_BTN_0;
+		else
+			cur_button = SND_JACK_BTN_1;
 		break;
 	case 0x27:
 		/* button volume down */
@@ -789,12 +840,12 @@ static void es8326_jack_button_handler(struct work_struct *work)
 			press_count = 0;
 		}
 		button_to_report = cur_button;
-		queue_delayed_work(system_wq, &es8326->button_press_work,
+		queue_delayed_work(system_dfl_wq, &es8326->button_press_work,
 				   msecs_to_jiffies(35));
 	} else if (prev_button != cur_button) {
 		/* mismatch, detect again */
 		prev_button = cur_button;
-		queue_delayed_work(system_wq, &es8326->button_press_work,
+		queue_delayed_work(system_dfl_wq, &es8326->button_press_work,
 				   msecs_to_jiffies(35));
 	} else {
 		/* released or no pressed */
@@ -805,8 +856,8 @@ static void es8326_jack_button_handler(struct work_struct *work)
 				    SND_JACK_BTN_0 | SND_JACK_BTN_1 | SND_JACK_BTN_2);
 			button_to_report = 0;
 		}
+		es8326_disable_micbias(es8326->component);
 	}
-	mutex_unlock(&es8326->lock);
 }
 
 static void es8326_jack_detect_handler(struct work_struct *work)
@@ -816,11 +867,11 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 	struct snd_soc_component *comp = es8326->component;
 	unsigned int iface;
 
-	mutex_lock(&es8326->lock);
+	guard(mutex)(&es8326->lock);
 	iface = snd_soc_component_read(comp, ES8326_HPDET_STA);
 	dev_dbg(comp->dev, "gpio flag %#04x", iface);
 
-	if ((es8326->jack_remove_retry == 1) && (es8326->version != ES8326_VERSION_B)) {
+	if ((es8326->jack_remove_retry == 1) && (es8326->version < ES8326_VERSION_B)) {
 		if (iface & ES8326_HPINSERT_FLAG)
 			es8326->jack_remove_retry = 2;
 		else
@@ -834,7 +885,7 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 		regmap_update_bits(es8326->regmap, ES8326_HPDET_TYPE,
 					ES8326_HP_DET_JACK_POL, (es8326->jd_inverted ?
 					~es8326->jack_pol : es8326->jack_pol));
-		goto exit;
+		return;
 	}
 
 	if ((iface & ES8326_HPINSERT_FLAG) == 0) {
@@ -843,6 +894,8 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 		es8326_disable_micbias(es8326->component);
 		if (es8326->jack->status & SND_JACK_HEADPHONE) {
 			dev_dbg(comp->dev, "Report hp remove event\n");
+			snd_soc_jack_report(es8326->jack, 0,
+				    SND_JACK_BTN_0 | SND_JACK_BTN_1 | SND_JACK_BTN_2);
 			snd_soc_jack_report(es8326->jack, 0, SND_JACK_HEADSET);
 			/* mute adc when mic path switch */
 			regmap_write(es8326->regmap, ES8326_ADC1_SRC, 0x44);
@@ -856,7 +909,7 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 		/*
 		 * Inverted HPJACK_POL bit to trigger one IRQ to double check HP Removal event
 		 */
-		if ((es8326->jack_remove_retry == 0) && (es8326->version != ES8326_VERSION_B)) {
+		if ((es8326->jack_remove_retry == 0) && (es8326->version < ES8326_VERSION_B)) {
 			es8326->jack_remove_retry = 1;
 			dev_dbg(comp->dev, "remove event check, invert HPJACK_POL, cnt = %d\n",
 					es8326->jack_remove_retry);
@@ -878,7 +931,6 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 			regmap_write(es8326->regmap, ES8326_INT_SOURCE, 0x00);
 			regmap_update_bits(es8326->regmap, ES8326_HPDET_TYPE, 0x03, 0x01);
 			regmap_update_bits(es8326->regmap, ES8326_HPDET_TYPE, 0x10, 0x00);
-			es8326_enable_micbias(es8326->component);
 			usleep_range(50000, 70000);
 			regmap_update_bits(es8326->regmap, ES8326_HPDET_TYPE, 0x03, 0x00);
 			regmap_update_bits(es8326->regmap, ES8326_HPDET_TYPE, 0x10, 0x10);
@@ -886,19 +938,20 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 			regmap_write(es8326->regmap, ES8326_INT_SOURCE,
 					(ES8326_INT_SRC_PIN9 | ES8326_INT_SRC_BUTTON));
 			regmap_write(es8326->regmap, ES8326_SYS_BIAS, 0x1f);
-			regmap_update_bits(es8326->regmap, ES8326_HP_DRIVER_REF, 0x0f, 0x08);
-			queue_delayed_work(system_wq, &es8326->jack_detect_work,
+			regmap_update_bits(es8326->regmap, ES8326_HP_DRIVER_REF, 0x0f, 0x0d);
+			queue_delayed_work(system_dfl_wq, &es8326->jack_detect_work,
 					msecs_to_jiffies(400));
 			es8326->hp = 1;
-			goto exit;
+			return;
 		}
 		if (es8326->jack->status & SND_JACK_HEADSET) {
 			/* detect button */
 			dev_dbg(comp->dev, "button pressed\n");
 			regmap_write(es8326->regmap, ES8326_INT_SOURCE,
 					(ES8326_INT_SRC_PIN9 | ES8326_INT_SRC_BUTTON));
-			queue_delayed_work(system_wq, &es8326->button_press_work, 10);
-			goto exit;
+			es8326_enable_micbias(es8326->component);
+			queue_delayed_work(system_dfl_wq, &es8326->button_press_work, 10);
+			return;
 		}
 		if ((iface & ES8326_HPBUTTON_FLAG) == 0x01) {
 			dev_dbg(comp->dev, "Headphone detected\n");
@@ -908,11 +961,8 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 			dev_dbg(comp->dev, "Headset detected\n");
 			snd_soc_jack_report(es8326->jack,
 					SND_JACK_HEADSET, SND_JACK_HEADSET);
-
 			regmap_update_bits(es8326->regmap, ES8326_PGA_PDN,
 					0x08, 0x08);
-			regmap_update_bits(es8326->regmap, ES8326_PGAGAIN,
-					0x80, 0x80);
 			regmap_write(es8326->regmap, ES8326_ADC1_SRC, 0x00);
 			regmap_write(es8326->regmap, ES8326_ADC2_SRC, 0x00);
 			regmap_update_bits(es8326->regmap, ES8326_PGA_PDN,
@@ -920,8 +970,6 @@ static void es8326_jack_detect_handler(struct work_struct *work)
 			usleep_range(10000, 15000);
 		}
 	}
-exit:
-	mutex_unlock(&es8326->lock);
 }
 
 static irqreturn_t es8326_irq(int irq, void *dev_id)
@@ -932,10 +980,10 @@ static irqreturn_t es8326_irq(int irq, void *dev_id)
 		goto out;
 
 	if (es8326->jack->status & SND_JACK_HEADSET)
-		queue_delayed_work(system_wq, &es8326->jack_detect_work,
+		queue_delayed_work(system_dfl_wq, &es8326->jack_detect_work,
 				   msecs_to_jiffies(10));
 	else
-		queue_delayed_work(system_wq, &es8326->jack_detect_work,
+		queue_delayed_work(system_dfl_wq, &es8326->jack_detect_work,
 				   msecs_to_jiffies(300));
 
 out:
@@ -951,7 +999,7 @@ static int es8326_calibrate(struct snd_soc_component *component)
 	regmap_read(es8326->regmap, ES8326_CHIP_VERSION, &reg);
 	es8326->version = reg;
 
-	if ((es8326->version == ES8326_VERSION_B) && (es8326->calibrated == false)) {
+	if ((es8326->version >= ES8326_VERSION_B) && (es8326->calibrated == false)) {
 		dev_dbg(component->dev, "ES8326_VERSION_B, calibrating\n");
 		regmap_write(es8326->regmap, ES8326_CLK_INV, 0xc0);
 		regmap_write(es8326->regmap, ES8326_CLK_DIV1, 0x03);
@@ -997,7 +1045,7 @@ static void es8326_init(struct snd_soc_component *component)
 	struct es8326_priv *es8326 = snd_soc_component_get_drvdata(component);
 
 	regmap_write(es8326->regmap, ES8326_RESET, 0x1f);
-	regmap_write(es8326->regmap, ES8326_VMIDSEL, 0x0E);
+	regmap_write(es8326->regmap, ES8326_VMIDSEL, 0x3E);
 	regmap_write(es8326->regmap, ES8326_ANA_LP, 0xf0);
 	usleep_range(10000, 15000);
 	regmap_write(es8326->regmap, ES8326_HPJACK_TIMER, 0xd9);
@@ -1044,7 +1092,7 @@ static void es8326_init(struct snd_soc_component *component)
 	regmap_write(es8326->regmap, ES8326_DAC_VPPSCALE, 0x15);
 
 	regmap_write(es8326->regmap, ES8326_HPDET_TYPE, 0x80 |
-			((es8326->version == ES8326_VERSION_B) ?
+			((es8326->version >= ES8326_VERSION_B) ?
 			(ES8326_HP_DET_SRC_PIN9 | es8326->jack_pol) :
 			(ES8326_HP_DET_SRC_PIN9 | es8326->jack_pol | 0x04)));
 	usleep_range(5000, 10000);
@@ -1053,8 +1101,7 @@ static void es8326_init(struct snd_soc_component *component)
 	regmap_update_bits(es8326->regmap, ES8326_HPDET_TYPE, 0x03, 0x00);
 	regmap_write(es8326->regmap, ES8326_INTOUT_IO,
 		     es8326->interrupt_clk);
-	regmap_write(es8326->regmap, ES8326_SDINOUT1_IO,
-		    (ES8326_IO_DMIC_CLK << ES8326_SDINOUT1_SHIFT));
+	regmap_write(es8326->regmap, ES8326_SDINOUT1_IO, ES8326_IO_INPUT);
 	regmap_write(es8326->regmap, ES8326_SDINOUT23_IO, ES8326_IO_INPUT);
 
 	regmap_write(es8326->regmap, ES8326_ANA_PDN, 0x00);
@@ -1067,6 +1114,13 @@ static void es8326_init(struct snd_soc_component *component)
 
 	regmap_write(es8326->regmap, ES8326_ADC_MUTE, 0x0f);
 	regmap_write(es8326->regmap, ES8326_CLK_DIV_LRCK, 0xff);
+	regmap_write(es8326->regmap, ES8326_ADC1_SRC, 0x44);
+	regmap_write(es8326->regmap, ES8326_ADC2_SRC, 0x66);
+	es8326_disable_micbias(es8326->component);
+	if (es8326->version > ES8326_VERSION_B) {
+		regmap_update_bits(es8326->regmap, ES8326_ANA_MICBIAS, 0x73, 0x10);
+		regmap_update_bits(es8326->regmap, ES8326_VMIDSEL, 0x40, 0x40);
+	}
 
 	msleep(200);
 	regmap_write(es8326->regmap, ES8326_INT_SOURCE, ES8326_INT_SRC_PIN9);
@@ -1098,6 +1152,7 @@ static int es8326_suspend(struct snd_soc_component *component)
 	struct es8326_priv *es8326 = snd_soc_component_get_drvdata(component);
 
 	cancel_delayed_work_sync(&es8326->jack_detect_work);
+	cancel_delayed_work_sync(&es8326->capture_pop_work);
 	es8326_disable_micbias(component);
 	es8326->calibrated = false;
 	regmap_write(es8326->regmap, ES8326_CLK_MUX, 0x2d);
@@ -1156,13 +1211,12 @@ static void es8326_enable_jack_detect(struct snd_soc_component *component,
 {
 	struct es8326_priv *es8326 = snd_soc_component_get_drvdata(component);
 
-	mutex_lock(&es8326->lock);
-	if (es8326->jd_inverted)
-		snd_soc_component_update_bits(component, ES8326_HPDET_TYPE,
-					      ES8326_HP_DET_JACK_POL, ~es8326->jack_pol);
-	es8326->jack = jack;
-
-	mutex_unlock(&es8326->lock);
+	scoped_guard(mutex, &es8326->lock) {
+		if (es8326->jd_inverted)
+			snd_soc_component_update_bits(component, ES8326_HPDET_TYPE,
+						      ES8326_HP_DET_JACK_POL, ~es8326->jack_pol);
+		es8326->jack = jack;
+	}
 	es8326_irq(es8326->irq, es8326);
 }
 
@@ -1175,13 +1229,12 @@ static void es8326_disable_jack_detect(struct snd_soc_component *component)
 		return; /* Already disabled (or never enabled) */
 	cancel_delayed_work_sync(&es8326->jack_detect_work);
 
-	mutex_lock(&es8326->lock);
+	guard(mutex)(&es8326->lock);
 	if (es8326->jack->status & SND_JACK_MICROPHONE) {
 		es8326_disable_micbias(component);
 		snd_soc_jack_report(es8326->jack, 0, SND_JACK_HEADSET);
 	}
 	es8326->jack = NULL;
-	mutex_unlock(&es8326->lock);
 }
 
 static int es8326_set_jack(struct snd_soc_component *component,
@@ -1251,6 +1304,8 @@ static int es8326_i2c_probe(struct i2c_client *i2c)
 			  es8326_jack_detect_handler);
 	INIT_DELAYED_WORK(&es8326->button_press_work,
 			  es8326_jack_button_handler);
+	INIT_DELAYED_WORK(&es8326->capture_pop_work,
+			  es8326_capture_pop_handler);
 	/* ES8316 is level-based while ES8326 is edge-based */
 	ret = devm_request_threaded_irq(&i2c->dev, es8326->irq, NULL, es8326_irq,
 					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
@@ -1303,8 +1358,8 @@ static void es8326_i2c_remove(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id es8326_i2c_id[] = {
-	{"es8326" },
-	{}
+	{ .name = "es8326" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, es8326_i2c_id);
 

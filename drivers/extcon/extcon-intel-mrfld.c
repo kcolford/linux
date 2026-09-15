@@ -10,7 +10,6 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/intel_soc_pmic.h>
 #include <linux/mfd/intel_soc_pmic_mrfld.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -275,7 +274,7 @@ static struct platform_driver mrfld_extcon_driver = {
 		.name	= "mrfld_bcove_pwrsrc",
 	},
 	.probe		= mrfld_extcon_probe,
-	.remove_new	= mrfld_extcon_remove,
+	.remove		= mrfld_extcon_remove,
 	.id_table	= mrfld_extcon_id_table,
 };
 module_platform_driver(mrfld_extcon_driver);

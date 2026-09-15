@@ -18,7 +18,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irq.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -1742,7 +1741,7 @@ static int xgene_dma_probe(struct platform_device *pdev)
 	/* Initialize DMA channels software state */
 	xgene_dma_init_channels(pdma);
 
-	/* Configue DMA rings */
+	/* Configure DMA rings */
 	ret = xgene_dma_init_rings(pdma);
 	if (ret)
 		goto err_clk_enable;
@@ -1815,7 +1814,7 @@ MODULE_DEVICE_TABLE(of, xgene_dma_of_match_ptr);
 
 static struct platform_driver xgene_dma_driver = {
 	.probe = xgene_dma_probe,
-	.remove_new = xgene_dma_remove,
+	.remove = xgene_dma_remove,
 	.driver = {
 		.name = "X-Gene-DMA",
 		.of_match_table = xgene_dma_of_match_ptr,

@@ -2,7 +2,6 @@
 // Copyright(c) 2015-2020 Intel Corporation.
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/soundwire/sdw.h>
@@ -215,7 +214,7 @@ const struct attribute_group *sdw_attr_groups[] = {
 
 /*
  * the status is shown in capital letters for UNATTACHED and RESERVED
- * on purpose, to highligh users to the fact that these status values
+ * on purpose, to highlight users to the fact that these status values
  * are not expected.
  */
 static const char *const slave_status[] = {

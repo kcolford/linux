@@ -9,7 +9,6 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -146,7 +145,7 @@ static struct platform_driver w1_gpio_driver = {
 		.of_match_table = w1_gpio_dt_ids,
 	},
 	.probe = w1_gpio_probe,
-	.remove_new = w1_gpio_remove,
+	.remove = w1_gpio_remove,
 };
 
 module_platform_driver(w1_gpio_driver);

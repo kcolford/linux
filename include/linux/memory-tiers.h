@@ -18,7 +18,7 @@
  * adistance value (slightly faster) than default DRAM adistance to be part of
  * the same memory tier.
  */
-#define MEMTIER_ADISTANCE_DRAM	((4 * MEMTIER_CHUNK_SIZE) + (MEMTIER_CHUNK_SIZE >> 1))
+#define MEMTIER_ADISTANCE_DRAM	((4L * MEMTIER_CHUNK_SIZE) + (MEMTIER_CHUNK_SIZE >> 1))
 
 struct memory_tier;
 struct memory_dev_type {
@@ -38,6 +38,7 @@ struct access_coordinate;
 #ifdef CONFIG_NUMA
 extern bool numa_demotion_enabled;
 extern struct memory_dev_type *default_dram_type;
+extern nodemask_t default_dram_nodes;
 struct memory_dev_type *alloc_memory_type(int adistance);
 void put_memory_type(struct memory_dev_type *memtype);
 void init_node_memory_type(int node, struct memory_dev_type *default_type);
@@ -51,12 +52,12 @@ int mt_perf_to_adistance(struct access_coordinate *perf, int *adist);
 struct memory_dev_type *mt_find_alloc_memory_type(int adist,
 						  struct list_head *memory_types);
 void mt_put_memory_types(struct list_head *memory_types);
-#ifdef CONFIG_MIGRATION
-int next_demotion_node(int node);
+#ifdef CONFIG_NUMA_MIGRATION
+int next_demotion_node(int node, const nodemask_t *allowed_mask);
 void node_get_allowed_targets(pg_data_t *pgdat, nodemask_t *targets);
 bool node_is_toptier(int node);
 #else
-static inline int next_demotion_node(int node)
+static inline int next_demotion_node(int node, const nodemask_t *allowed_mask)
 {
 	return NUMA_NO_NODE;
 }
@@ -76,6 +77,7 @@ static inline bool node_is_toptier(int node)
 
 #define numa_demotion_enabled	false
 #define default_dram_type	NULL
+#define default_dram_nodes	NODE_MASK_NONE
 /*
  * CONFIG_NUMA implementation returns non NULL error.
  */
@@ -99,7 +101,7 @@ static inline void clear_node_memory_type(int node, struct memory_dev_type *memt
 
 }
 
-static inline int next_demotion_node(int node)
+static inline int next_demotion_node(int node, const nodemask_t *allowed_mask)
 {
 	return NUMA_NO_NODE;
 }

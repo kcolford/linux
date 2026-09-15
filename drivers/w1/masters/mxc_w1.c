@@ -9,7 +9,6 @@
 #include <linux/io.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include <linux/w1.h>
@@ -172,7 +171,7 @@ static struct platform_driver mxc_w1_driver = {
 		.of_match_table = mxc_w1_dt_ids,
 	},
 	.probe = mxc_w1_probe,
-	.remove_new = mxc_w1_remove,
+	.remove = mxc_w1_remove,
 };
 module_platform_driver(mxc_w1_driver);
 

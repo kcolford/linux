@@ -22,7 +22,6 @@
 #include <linux/kernel.h>
 #include <linux/stat.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -215,11 +214,11 @@ static const struct ms_tp_data ms8607_data = {
 };
 
 static const struct i2c_device_id ms5637_id[] = {
-	{"ms5637", (kernel_ulong_t)&ms5637_data },
-	{"ms5805", (kernel_ulong_t)&ms5805_data },
-	{"ms5837", (kernel_ulong_t)&ms5837_data },
-	{"ms8607-temppressure", (kernel_ulong_t)&ms8607_data },
-	{}
+	{ .name = "ms5637", .driver_data = (kernel_ulong_t)&ms5637_data },
+	{ .name = "ms5805", .driver_data = (kernel_ulong_t)&ms5805_data },
+	{ .name = "ms5837", .driver_data = (kernel_ulong_t)&ms5837_data },
+	{ .name = "ms8607-temppressure", .driver_data = (kernel_ulong_t)&ms8607_data },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ms5637_id);
 
@@ -229,7 +228,7 @@ static const struct of_device_id ms5637_of_match[] = {
 	{ .compatible = "meas,ms5805", .data = &ms5805_data },
 	{ .compatible = "meas,ms5837", .data = &ms5837_data },
 	{ .compatible = "meas,ms8607-temppressure", .data = &ms8607_data },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ms5637_of_match);
 
@@ -248,4 +247,4 @@ MODULE_DESCRIPTION("Measurement-Specialties ms5637 temperature & pressure driver
 MODULE_AUTHOR("William Markezana <william.markezana@meas-spec.com>");
 MODULE_AUTHOR("Ludovic Tancerel <ludovic.tancerel@maplehightech.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_MEAS_SPEC_SENSORS);
+MODULE_IMPORT_NS("IIO_MEAS_SPEC_SENSORS");

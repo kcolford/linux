@@ -7,9 +7,9 @@ TCP Authentication Option Linux implementation (RFC5925)
 TCP Authentication Option (TCP-AO) provides a TCP extension aimed at verifying
 segments between trusted peers. It adds a new TCP header option with
 a Message Authentication Code (MAC). MACs are produced from the content
-of a TCP segment using a hashing function with a password known to both peers.
+of a TCP segment using a key known to both peers.
 The intent of TCP-AO is to deprecate TCP-MD5 providing better security,
-key rotation and support for variety of hashing algorithms.
+key rotation and support for a variety of MAC algorithms.
 
 1. Introduction
 ===============
@@ -19,16 +19,18 @@ key rotation and support for variety of hashing algorithms.
  +----------------------+------------------------+-----------------------+
  |                      |       TCP-MD5          |         TCP-AO        |
  +======================+========================+=======================+
- |Supported hashing     |MD5                     |Must support HMAC-SHA1 |
- |algorithms            |(cryptographically weak)|(chosen-prefix attacks)|
- |                      |                        |and CMAC-AES-128 (only |
- |                      |                        |side-channel attacks). |
- |                      |                        |May support any hashing|
- |                      |                        |algorithm.             |
+ |Supported MAC         |MD5 of data and key     |HMAC-SHA-1-96 and      |
+ |algorithms            |(cryptographically weak)|AES-128-CMAC-96.       |
+ |                      |                        |Implementations are    |
+ |                      |                        |permitted to support   |
+ |                      |                        |additional algorithms. |
  +----------------------+------------------------+-----------------------+
- |Length of MACs (bytes)|16                      |Typically 12-16.       |
- |                      |                        |Other variants that fit|
- |                      |                        |TCP header permitted.  |
+ |Length of MACs (bytes)|16                      |12 for HMAC-SHA-1-96   |
+ |                      |                        |and AES-128-CMAC-96.   |
+ |                      |                        |Implementations are    |
+ |                      |                        |permitted to support   |
+ |                      |                        |any MAC length that    |
+ |                      |                        |fits in the TCP header.|
  +----------------------+------------------------+-----------------------+
  |Number of keys per    |1                       |Many                   |
  |TCP connection        |                        |                       |
@@ -164,9 +166,9 @@ A: It should not, no action needs to be performed [7.5.2.e]::
        is not available, no action is required (RNextKeyID of a received
        segment needs to match the MKT’s SendID).
 
-Q: How current_key is set and when does it change? It is a user-triggered
-change, or is it by a request from the remote peer? Is it set by the user
-explicitly, or by a matching rule?
+Q: How is current_key set, and when does it change? Is it a user-triggered
+change, or is it triggered by a request from the remote peer? Is it set by the
+user explicitly, or by a matching rule?
 
 A: current_key is set by RNextKeyID [6.1]::
 
@@ -233,8 +235,8 @@ always have one current_key [3.3]::
 
 Q: Can a non-TCP-AO connection become a TCP-AO-enabled one?
 
-A: No: for already established non-TCP-AO connection it would be impossible
-to switch using TCP-AO as the traffic key generation requires the initial
+A: No: for an already established non-TCP-AO connection it would be impossible
+to switch to using TCP-AO, as the traffic key generation requires the initial
 sequence numbers. Paraphrasing, starting using TCP-AO would require
 re-establishing the TCP connection.
 
@@ -292,9 +294,23 @@ no transparency is really needed and modern BGP daemons already have
 
 Linux provides a set of ``setsockopt()s`` and ``getsockopt()s`` that let
 userspace manage TCP-AO on a per-socket basis. In order to add/delete MKTs
-``TCP_AO_ADD_KEY`` and ``TCP_AO_DEL_KEY`` TCP socket options must be used
+``TCP_AO_ADD_KEY`` and ``TCP_AO_DEL_KEY`` TCP socket options must be used.
 It is not allowed to add a key on an established non-TCP-AO connection
 as well as to remove the last key from TCP-AO connection.
+
+``TCP_AO_ADD_KEY`` allows the MAC algorithm and MAC length to be selected.
+Linux supports the mandatory-to-implement algorithms HMAC-SHA-1-96 and
+AES-128-CMAC-96. In addition, as Linux extensions, it supports:
+
+- HMAC-SHA256. Linux uses HMAC-SHA256 in the same way as HMAC-SHA1; this
+  includes omitting an explicit entropy extraction step. To work around the
+  missing entropy extraction, users should provide keys with full entropy. The
+  implementation is interoperable with other implementations of HMAC-SHA256 for
+  TCP-AO only when they have implemented the key derivation the same way (and
+  also the same MAC length is selected on each side).
+
+- Any MAC length for any of the supported MAC algorithms, provided it fits in
+  the TCP header and is at least 4 bytes.
 
 ``setsockopt(TCP_AO_DEL_KEY)`` command may specify ``tcp_ao_del::current_key``
 + ``tcp_ao_del::set_current`` and/or ``tcp_ao_del::rnext``
@@ -361,7 +377,7 @@ not implemented.
 4. ``setsockopt()`` vs ``accept()`` race
 ========================================
 
-In contrast with TCP-MD5 established connection which has just one key,
+In contrast with an established TCP-MD5 connection which has just one key,
 TCP-AO connections may have many keys, which means that accepted connections
 on a listen socket may have any amount of keys as well. As copying all those
 keys on a first properly signed SYN would make the request socket bigger, that
@@ -374,7 +390,7 @@ keys from sockets that were already established, but not yet ``accept()``'ed,
 hanging in the accept queue.
 
 The reverse is valid as well: if userspace adds a new key for a peer on
-a listener socket, the established sockets in accept queue won't
+a listener socket, the established sockets in the accept queue won't
 have the new keys.
 
 At this moment, the resolution for the two races:
@@ -382,7 +398,7 @@ At this moment, the resolution for the two races:
 and ``setsockopt(TCP_AO_DEL_KEY)`` vs ``accept()`` is delegated to userspace.
 This means that it's expected that userspace would check the MKTs on the socket
 that was returned by ``accept()`` to verify that any key rotation that
-happened on listen socket is reflected on the newly established connection.
+happened on the listen socket is reflected on the newly established connection.
 
 This is a similar "do-nothing" approach to TCP-MD5 from the kernel side and
 may be changed later by introducing new flags to ``tcp_ao_add``

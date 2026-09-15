@@ -51,6 +51,9 @@
  *  - KSMBD_EVENT_SPNEGO_AUTHEN_REQUEST/RESPONSE(ksmbd_spnego_authen_request/response)
  *    This event is to make kerberos authentication to be processed in
  *    userspace.
+ *
+ *  - KSMBD_EVENT_LOGIN_REQUEST_EXT/RESPONSE_EXT(ksmbd_login_request_ext/response_ext)
+ *    This event is to get user account extension info to user IPC daemon.
  */
 
 #define KSMBD_GENL_NAME		"SMBD_GENL"
@@ -108,10 +111,13 @@ struct ksmbd_startup_request {
 	__u32	smb2_max_credits;	/* MAX credits */
 	__u32	smbd_max_io_size;	/* smbd read write size */
 	__u32	max_connections;	/* Number of maximum simultaneous connections */
-	__u32	reserved[126];		/* Reserved room */
+	__s8	bind_interfaces_only;
+	__u32	max_ip_connections;	/* Number of maximum connection per ip address */
+	__s8	aapl_model[32];		/* AAPL model string for Finder icon, e.g. "Xserve" */
+	__s8	reserved[467];		/* Reserved room */
 	__u32	ifc_list_sz;		/* interfaces list size */
 	__s8	____payload[];
-};
+} __packed;
 
 #define KSMBD_STARTUP_CONFIG_INTERFACES(s)	((s)->____payload)
 
@@ -143,6 +149,16 @@ struct ksmbd_login_response {
 	__u16	hash_sz;			/* hash size */
 	__s8	hash[KSMBD_REQ_MAX_HASH_SZ];	/* password hash */
 	__u32	reserved[16];			/* Reserved room */
+};
+
+/*
+ * IPC user login response extension.
+ */
+struct ksmbd_login_response_ext {
+	__u32	handle;
+	__s32	ngroups;			/* supplementary group count */
+	__s8	reserved[128];			/* Reserved room */
+	__s8	____payload[];
 };
 
 /*
@@ -213,7 +229,7 @@ struct ksmbd_tree_connect_response {
 };
 
 /*
- * IPC Request struture to disconnect tree connection.
+ * IPC Request structure to disconnect tree connection.
  */
 struct ksmbd_tree_disconnect_request {
 	__u64	session_id;	/* session id */
@@ -270,6 +286,7 @@ struct ksmbd_spnego_authen_response {
 				  * stored in SecurityBuffer of SMB2 SESSION
 				  * SETUP response
 				  */
+	__u64	session_expiry;	/* Kerberos ticket expiry time */
 	__u8	payload[]; /* session key + AP_REP */
 };
 
@@ -306,6 +323,9 @@ enum ksmbd_event {
 	KSMBD_EVENT_SPNEGO_AUTHEN_REQUEST,
 	KSMBD_EVENT_SPNEGO_AUTHEN_RESPONSE	= 15,
 
+	KSMBD_EVENT_LOGIN_REQUEST_EXT,
+	KSMBD_EVENT_LOGIN_RESPONSE_EXT,
+
 	__KSMBD_EVENT_MAX,
 	KSMBD_EVENT_MAX = __KSMBD_EVENT_MAX - 1
 };
@@ -336,6 +356,7 @@ enum KSMBD_TREE_CONN_STATUS {
 #define KSMBD_USER_FLAG_BAD_USER	BIT(3)
 #define KSMBD_USER_FLAG_GUEST_ACCOUNT	BIT(4)
 #define KSMBD_USER_FLAG_DELAY_SESSION	BIT(5)
+#define KSMBD_USER_FLAG_EXTENSION	BIT(6)
 
 /*
  * Share config flags.
@@ -358,6 +379,10 @@ enum KSMBD_TREE_CONN_STATUS {
 #define KSMBD_SHARE_FLAG_UPDATE				BIT(14)
 #define KSMBD_SHARE_FLAG_CROSSMNT			BIT(15)
 #define KSMBD_SHARE_FLAG_CONTINUOUS_AVAILABILITY	BIT(16)
+#define KSMBD_SHARE_FLAG_HIDE_UNREADABLE		BIT(17)
+#define KSMBD_SHARE_FLAG_TIME_MACHINE			BIT(18)
+/* Keep BIT(19) reserved for the existing ksmbd-tools WIDE_LINKS flag. */
+#define KSMBD_SHARE_FLAG_ENCRYPT_DATA			BIT(20)
 
 /*
  * Tree connect request flags.

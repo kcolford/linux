@@ -5,11 +5,12 @@
 #include "xe_drm_client.h"
 
 #include <drm/drm_print.h>
-#include <drm/xe_drm.h>
+#include <uapi/drm/xe_drm.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 
+#include "xe_assert.h"
 #include "xe_bo.h"
 #include "xe_bo_types.h"
 #include "xe_device_types.h"
@@ -87,7 +88,7 @@ struct xe_drm_client *xe_drm_client_alloc(void)
 {
 	struct xe_drm_client *client;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client)
 		return NULL;
 
@@ -134,8 +135,8 @@ void xe_drm_client_add_bo(struct xe_drm_client *client,
 	XE_WARN_ON(bo->client);
 	XE_WARN_ON(!list_empty(&bo->client_link));
 
-	spin_lock(&client->bos_lock);
 	bo->client = xe_drm_client_get(client);
+	spin_lock(&client->bos_lock);
 	list_add_tail(&bo->client_link, &client->bos_list);
 	spin_unlock(&client->bos_lock);
 }
@@ -151,10 +152,13 @@ void xe_drm_client_add_bo(struct xe_drm_client *client,
  */
 void xe_drm_client_remove_bo(struct xe_bo *bo)
 {
+	struct xe_device *xe = ttm_to_xe_device(bo->ttm.bdev);
 	struct xe_drm_client *client = bo->client;
 
+	xe_assert(xe, !kref_read(&bo->ttm.base.refcount));
+
 	spin_lock(&client->bos_lock);
-	list_del(&bo->client_link);
+	list_del_init(&bo->client_link);
 	spin_unlock(&client->bos_lock);
 
 	xe_drm_client_put(client);
@@ -163,13 +167,20 @@ void xe_drm_client_remove_bo(struct xe_bo *bo)
 static void bo_meminfo(struct xe_bo *bo,
 		       struct drm_memory_stats stats[TTM_NUM_MEM_TYPES])
 {
-	u64 sz = bo->size;
+	u64 sz = xe_bo_size(bo);
 	u32 mem_type;
 
-	if (bo->placement.placement)
-		mem_type = bo->placement.placement->mem_type;
-	else
-		mem_type = XE_PL_TT;
+	xe_bo_assert_held(bo);
+
+	/*
+	 * The resource can be NULL if the BO has been purged, plus maybe some
+	 * other cases. Either way there shouldn't be any memory to account for,
+	 * or a current resource to account this against, so skip for now.
+	 */
+	if (!bo->ttm.resource)
+		return;
+
+	mem_type = bo->ttm.resource->mem_type;
 
 	if (drm_gem_object_is_shared_for_memory_stats(&bo->ttm.base))
 		stats[mem_type].shared += sz;
@@ -182,7 +193,7 @@ static void bo_meminfo(struct xe_bo *bo,
 		if (!dma_resv_test_signaled(bo->ttm.base.resv,
 					    DMA_RESV_USAGE_BOOKKEEP))
 			stats[mem_type].active += sz;
-		else if (mem_type == XE_PL_SYSTEM)
+		else if (mem_type == XE_PL_SYSTEM || xe_bo_madv_is_dontneed(bo))
 			stats[mem_type].purgeable += sz;
 	}
 }
@@ -196,6 +207,7 @@ static void show_meminfo(struct drm_printer *p, struct drm_file *file)
 	struct xe_drm_client *client;
 	struct drm_gem_object *obj;
 	struct xe_bo *bo;
+	LLIST_HEAD(deferred);
 	unsigned int id;
 	u32 mem_type;
 
@@ -206,7 +218,20 @@ static void show_meminfo(struct drm_printer *p, struct drm_file *file)
 	idr_for_each_entry(&file->object_idr, obj, id) {
 		struct xe_bo *bo = gem_to_xe_bo(obj);
 
-		bo_meminfo(bo, stats);
+		if (dma_resv_trylock(bo->ttm.base.resv)) {
+			bo_meminfo(bo, stats);
+			xe_bo_unlock(bo);
+		} else {
+			xe_bo_get(bo);
+			spin_unlock(&file->table_lock);
+
+			xe_bo_lock(bo, false);
+			bo_meminfo(bo, stats);
+			xe_bo_unlock(bo);
+
+			xe_bo_put(bo);
+			spin_lock(&file->table_lock);
+		}
 	}
 	spin_unlock(&file->table_lock);
 
@@ -215,10 +240,27 @@ static void show_meminfo(struct drm_printer *p, struct drm_file *file)
 	list_for_each_entry(bo, &client->bos_list, client_link) {
 		if (!kref_get_unless_zero(&bo->ttm.base.refcount))
 			continue;
-		bo_meminfo(bo, stats);
-		xe_bo_put(bo);
+
+		if (dma_resv_trylock(bo->ttm.base.resv)) {
+			bo_meminfo(bo, stats);
+			xe_bo_unlock(bo);
+		} else {
+			spin_unlock(&client->bos_lock);
+
+			xe_bo_lock(bo, false);
+			bo_meminfo(bo, stats);
+			xe_bo_unlock(bo);
+
+			spin_lock(&client->bos_lock);
+			/* The bo ref will prevent this bo from being removed from the list */
+			xe_assert(xef->xe, !list_empty(&bo->client_link));
+		}
+
+		xe_bo_put_deferred(bo, &deferred);
 	}
 	spin_unlock(&client->bos_lock);
+
+	xe_bo_put_commit(&deferred);
 
 	for (mem_type = XE_PL_SYSTEM; mem_type < TTM_NUM_MEM_TYPES; ++mem_type) {
 		if (!xe_mem_type_to_name[mem_type])
@@ -229,12 +271,54 @@ static void show_meminfo(struct drm_printer *p, struct drm_file *file)
 		if (man) {
 			drm_print_memory_stats(p,
 					       &stats[mem_type],
+					       DRM_GEM_OBJECT_ACTIVE |
 					       DRM_GEM_OBJECT_RESIDENT |
-					       (mem_type != XE_PL_SYSTEM ? 0 :
-					       DRM_GEM_OBJECT_PURGEABLE),
+					       DRM_GEM_OBJECT_PURGEABLE,
 					       xe_mem_type_to_name[mem_type]);
 		}
 	}
+}
+
+static struct xe_hw_engine *any_engine(struct xe_device *xe)
+{
+	struct xe_gt *gt;
+	unsigned long gt_id;
+
+	for_each_gt(gt, xe, gt_id) {
+		struct xe_hw_engine *hwe = xe_gt_any_hw_engine(gt);
+
+		if (hwe)
+			return hwe;
+	}
+
+	return NULL;
+}
+
+/*
+ * Pick any engine and grab its forcewake.  On error phwe will be NULL and
+ * the returned forcewake reference will be invalid.  Callers should check
+ * phwe against NULL.
+ */
+static struct xe_force_wake_ref force_wake_get_any_engine(struct xe_device *xe,
+							  struct xe_hw_engine **phwe)
+{
+	enum xe_force_wake_domains domain;
+	struct xe_force_wake_ref fw_ref = {};
+	struct xe_hw_engine *hwe;
+
+	*phwe = NULL;
+
+	hwe = any_engine(xe);
+	if (!hwe)
+		return fw_ref;	/* will be invalid */
+
+	domain = xe_hw_engine_to_fw_domain(hwe);
+
+	fw_ref = xe_force_wake_constructor(gt_to_fw(hwe->gt), domain);
+	if (xe_force_wake_ref_has_domain(fw_ref.domains, domain))
+		*phwe = hwe;	/* valid forcewake */
+
+	return fw_ref;
 }
 
 static void show_run_ticks(struct drm_printer *p, struct drm_file *file)
@@ -247,40 +331,41 @@ static void show_run_ticks(struct drm_printer *p, struct drm_file *file)
 	struct xe_exec_queue *q;
 	u64 gpu_timestamp;
 
-	xe_pm_runtime_get(xe);
+	/*
+	 * RING_TIMESTAMP registers are inaccessible in VF mode.
+	 * Without drm-total-cycles-*, other keys provide little value.
+	 * Show all or none of the optional "run_ticks" keys in this case.
+	 */
+	if (IS_SRIOV_VF(xe))
+		return;
 
-	/* Accumulate all the exec queues from this client */
-	mutex_lock(&xef->exec_queue.lock);
-	xa_for_each(&xef->exec_queue.xa, i, q) {
-		xe_exec_queue_update_run_ticks(q);
-		xef->run_ticks[q->class] += q->run_ticks - q->old_run_ticks;
-		q->old_run_ticks = q->run_ticks;
-	}
-	mutex_unlock(&xef->exec_queue.lock);
+	/*
+	 * Wait for any exec queue going away: their cycles will get updated on
+	 * context switch out, so wait for that to happen
+	 */
+	wait_var_event(&xef->exec_queue.pending_removal,
+		       !atomic_read(&xef->exec_queue.pending_removal));
 
-	/* Get the total GPU cycles */
-	for_each_gt(gt, xe, gt_id) {
-		enum xe_force_wake_domains fw;
-
-		hwe = xe_gt_any_hw_engine(gt);
+	scoped_guard(xe_pm_runtime, xe) {
+		CLASS(xe_force_wake_release_only, fw_ref)(force_wake_get_any_engine(xe, &hwe));
 		if (!hwe)
-			continue;
+			return;
 
-		fw = xe_hw_engine_to_fw_domain(hwe);
-		if (xe_force_wake_get(gt_to_fw(gt), fw)) {
-			hwe = NULL;
-			break;
+		/* Accumulate all the exec queues from this client */
+		mutex_lock(&xef->exec_queue.lock);
+		xa_for_each(&xef->exec_queue.xa, i, q) {
+			xe_exec_queue_get(q);
+			mutex_unlock(&xef->exec_queue.lock);
+
+			xe_exec_queue_update_run_ticks(q);
+
+			mutex_lock(&xef->exec_queue.lock);
+			xe_exec_queue_put(q);
 		}
+		mutex_unlock(&xef->exec_queue.lock);
 
 		gpu_timestamp = xe_hw_engine_read_timestamp(hwe);
-		XE_WARN_ON(xe_force_wake_put(gt_to_fw(gt), fw));
-		break;
 	}
-
-	xe_pm_runtime_put(xe);
-
-	if (unlikely(!hwe))
-		return;
 
 	for (class = 0; class < XE_ENGINE_CLASS_MAX; class++) {
 		const char *class_name;
@@ -312,7 +397,7 @@ static void show_run_ticks(struct drm_printer *p, struct drm_file *file)
  * @p: The drm_printer ptr
  * @file: The drm_file ptr
  *
- * This is callabck for drm fdinfo interface. Register this callback
+ * This is callback for drm fdinfo interface. Register this callback
  * in drm driver ops for show_fdinfo.
  *
  * Return: void

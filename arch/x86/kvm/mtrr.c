@@ -19,6 +19,7 @@
 #include <asm/mtrr.h>
 
 #include "cpuid.h"
+#include "msrs.h"
 
 static u64 *find_mtrr(struct kvm_vcpu *vcpu, unsigned int msr)
 {

@@ -17,7 +17,6 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
 #include <linux/of_dma.h>
@@ -56,7 +55,7 @@ static struct sf_pdma_desc *sf_pdma_alloc_desc(struct sf_pdma_chan *chan)
 {
 	struct sf_pdma_desc *desc;
 
-	desc = kzalloc(sizeof(*desc), GFP_NOWAIT);
+	desc = kzalloc_obj(*desc, GFP_NOWAIT);
 	if (!desc)
 		return NULL;
 
@@ -354,7 +353,7 @@ static irqreturn_t sf_pdma_done_isr(int irq, void *dev_id)
 	if (!residue) {
 		tasklet_hi_schedule(&chan->done_tasklet);
 	} else {
-		/* submit next trascatioin if possible */
+		/* submit next transaction if possible */
 		struct sf_pdma_desc *desc = chan->desc;
 
 		desc->src_addr += desc->xfer_size - residue;
@@ -633,7 +632,7 @@ MODULE_DEVICE_TABLE(of, sf_pdma_dt_ids);
 
 static struct platform_driver sf_pdma_driver = {
 	.probe		= sf_pdma_probe,
-	.remove_new	= sf_pdma_remove,
+	.remove		= sf_pdma_remove,
 	.driver		= {
 		.name	= "sf-pdma",
 		.of_match_table = sf_pdma_dt_ids,

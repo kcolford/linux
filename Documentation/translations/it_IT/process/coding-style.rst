@@ -604,8 +604,11 @@ il PERCHÉ.
 
 Per favore, quando commentate una funzione dell'API del kernel usate il
 formato kernel-doc.  Per maggiori dettagli, leggete i file in
-:ref::ref:`Documentation/translations/it_IT/doc-guide/ <it_doc_guide>` e in
-``script/kernel-doc``.
+:ref:`Documentation/translations/it_IT/doc-guide/ <it_doc_guide>` e in
+``tools/docs/kernel-doc``. Da notare che il pericolo di commentare troppo
+si applica anche ai commenti kernel-doc. Non aggiungete kernel-doc
+superfluo che si limita a ripetere quanto già ovvio dalla firma della
+funzione.
 
 Lo stile preferito per i commenti più lunghi (multi-riga) è:
 
@@ -618,18 +621,6 @@ Lo stile preferito per i commenti più lunghi (multi-riga) è:
 	 *
 	 * Description:  A column of asterisks on the left side,
 	 * with beginning and ending almost-blank lines.
-	 */
-
-Per i file in net/ e in drivers/net/ lo stile preferito per i commenti
-più lunghi (multi-riga) è leggermente diverso.
-
-.. code-block:: c
-
-	/* The preferred comment style for files in net/ and drivers/net
-	 * looks like this.
-	 *
-	 * It is nearly the same as the generally preferred comment style,
-	 * but there is no initial almost-blank line.
 	 */
 
 È anche importante commentare i dati, sia per i tipi base che per tipi
@@ -726,7 +717,7 @@ di stile, refusi e possibilmente anche delle migliorie. È anche utile per
 ordinare gli ``#include``, per allineare variabili/macro, per ridistribuire
 il testo e altre cose simili.
 Per maggiori dettagli, consultate il file
-:ref:`Documentation/translations/it_IT/process/clang-format.rst <it_clangformat>`.
+:ref:`Documentation/translations/it_IT/dev-tools/clang-format.rst <it_clangformat>`.
 
 Se utilizzate un programma compatibile con EditorConfig, allora alcune
 configurazioni basilari come l'indentazione e la fine delle righe verranno
@@ -827,6 +818,29 @@ blocco do - while:
 				do_this(b, c);		\
 		} while (0)
 
+Le macro che sembrano funzioni con parametri non usati dovrebbero essere
+sostituite da funzioni inline per evitare il problema.
+
+.. code-block:: c
+
+       static inline void fun(struct foo *foo)
+       {
+       }
+
+Per motivi storici, molti file usano ancora l'approccio "cast a (void)" per
+valutare i parametri. Tuttavia, non è raccomandato. Le funzioni inline risolvono
+i problemi di "espressioni con effetti avversi valutate più di una volta",
+variabili non utilizzate, e in genere per qualche motivo sono documentate
+meglio.
+
+.. code-block:: c
+
+       /*
+        * Avoid doing this whenever possible and instead opt for static
+        * inline functions
+        */
+       #define macrofun(foo) do { (void) (foo); } while (0)
+
 Cose da evitare quando si usano le macro:
 
 1) le macro che hanno effetti sul flusso del codice:
@@ -924,7 +938,7 @@ racchiusa in #ifdef, potete usare printk(KERN_DEBUG ...).
 ---------------------
 
 Il kernel fornisce i seguenti assegnatori ad uso generico:
-kmalloc(), kzalloc(), kmalloc_array(), kcalloc(), vmalloc(), e vzalloc().
+kmalloc(), kzalloc(), kmalloc_objs(), kzalloc_objs(), vmalloc(), e vzalloc().
 Per maggiori informazioni, consultate la documentazione dell'API:
 :ref:`Documentation/translations/it_IT/core-api/memory-allocation.rst <it_memory_allocation>`
 
@@ -932,7 +946,7 @@ Il modo preferito per passare la dimensione di una struttura è il seguente:
 
 .. code-block:: c
 
-	p = kmalloc(sizeof(*p), ...);
+	p = kmalloc_obj(*p, ...);
 
 La forma alternativa, dove il nome della struttura viene scritto interamente,
 peggiora la leggibilità e introduce possibili bachi quando il tipo di
@@ -946,13 +960,13 @@ Il modo preferito per assegnare un vettore è il seguente:
 
 .. code-block:: c
 
-	p = kmalloc_array(n, sizeof(...), ...);
+	p = kmalloc_objs(*p, n, ...);
 
 Il modo preferito per assegnare un vettore a zero è il seguente:
 
 .. code-block:: c
 
-	p = kcalloc(n, sizeof(...), ...);
+	p = kzalloc_objs(*p, n, ...);
 
 Entrambe verificano la condizione di overflow per la dimensione
 d'assegnamento n * sizeof(...), se accade ritorneranno NULL.
@@ -1057,14 +1071,16 @@ può migliorare la leggibilità.
 18) Non reinventate le macro del kernel
 ---------------------------------------
 
-Il file di intestazione include/linux/kernel.h contiene un certo numero
-di macro che dovreste usare piuttosto che implementarne una qualche variante.
-Per esempio, se dovete calcolare la lunghezza di un vettore, sfruttate la
-macro:
+Ci sono molti file d'intestazione in include/linux/ che contengono un certo
+numero di macro che dovreste usare piuttosto che implementarne una qualche
+variante. Per esempio, se dovete calcolare la lunghezza di un vettore,
+sfruttate la macro:
 
 .. code-block:: c
 
 	#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+
+che è definita in array_size.h.
 
 Analogamente, se dovete calcolare la dimensione di un qualche campo di una
 struttura, usate
@@ -1073,10 +1089,12 @@ struttura, usate
 
 	#define sizeof_field(t, f) (sizeof(((t*)0)->f))
 
-Ci sono anche le macro min() e max() che, se vi serve, effettuano un controllo
-rigido sui tipi.  Sentitevi liberi di leggere attentamente questo file
-d'intestazione per scoprire cos'altro è stato definito che non dovreste
-reinventare nel vostro codice.
+che è definita in stddef.h.
+
+Ci sono anche le macro min() e max(), definite in minmax.h, che, se vi
+serve, effettuano un controllo rigido sui tipi. Sentitevi liberi di
+leggere attentamente questi file d'intestazione per scoprire cos'altro è
+stato definito che non dovreste reinventare nel vostro codice.
 
 19) Linee di configurazione degli editor e altre schifezze
 -----------------------------------------------------------

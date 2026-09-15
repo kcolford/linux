@@ -6,7 +6,7 @@
  * Copyright (C) 2019-2021 Maximilian Luz <luzmaximilian@gmail.com>
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -260,8 +260,11 @@ static const struct spwr_psy_properties spwr_psy_props_adp1 = {
 };
 
 static const struct ssam_device_id surface_ac_match[] = {
-	{ SSAM_SDEV(BAT, SAM, 0x01, 0x01), (unsigned long)&spwr_psy_props_adp1 },
-	{ },
+	{
+		SSAM_SDEV(BAT, SAM, 0x01, 0x01),
+		.driver_data = (unsigned long)&spwr_psy_props_adp1,
+	},
+	{ }
 };
 MODULE_DEVICE_TABLE(ssam, surface_ac_match);
 

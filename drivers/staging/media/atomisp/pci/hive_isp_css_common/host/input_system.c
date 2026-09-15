@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2010-015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include "system_global.h"
@@ -147,11 +138,10 @@ void receiver_port_enable(
 	hrt_data	reg = receiver_port_reg_load(ID, port_ID,
 			  _HRT_CSS_RECEIVER_DEVICE_READY_REG_IDX);
 
-	if (cnd) {
+	if (cnd)
 		reg |= 0x01;
-	} else {
+	else
 		reg &= ~0x01;
-	}
 
 	receiver_port_reg_store(ID, port_ID,
 				_HRT_CSS_RECEIVER_DEVICE_READY_REG_IDX, reg);
@@ -203,9 +193,8 @@ static void receiver_rst(
 	assert(ID < N_RX_ID);
 
 // Disable all ports.
-	for (port_id = MIPI_PORT0_ID; port_id < N_MIPI_PORT_ID; port_id++) {
+	for (port_id = MIPI_PORT0_ID; port_id < N_MIPI_PORT_ID; port_id++)
 		receiver_port_enable(ID, port_id, false);
-	}
 
 	// AM: Additional actions for stopping receiver?
 }
@@ -406,7 +395,7 @@ input_system_err_t input_system_configuration_reset(void)
 	config.unallocated_ib_mem_words			 = IB_CAPACITY_IN_WORDS;
 	//config.acq_allocated_ib_mem_words		 = 0;
 
-	// Set the start of the session cofiguration.
+	/* Set the start of the session configuration. */
 	config.session_flags = INPUT_SYSTEM_CFG_FLAG_REQUIRED;
 
 	return INPUT_SYSTEM_ERR_NO_ERROR;
@@ -839,15 +828,13 @@ input_system_err_t input_system_configuration_commit(void)
 	// The last configuration step is to configure the input buffer.
 	input_system_err_t error = input_buffer_configuration();
 
-	if (error != INPUT_SYSTEM_ERR_NO_ERROR) {
+	if (error != INPUT_SYSTEM_ERR_NO_ERROR)
 		return error;
-	}
 
 	// Translate the whole configuration into registers.
 	error = configuration_to_registers();
-	if (error != INPUT_SYSTEM_ERR_NO_ERROR) {
+	if (error != INPUT_SYSTEM_ERR_NO_ERROR)
 		return error;
-	}
 
 	// Translate the whole configuration into ctrl commands etc.
 

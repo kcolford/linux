@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Simple test of virtio code, entirely in userpsace. */
+/* Simple test of virtio code, entirely in userspace. */
 #define _GNU_SOURCE
 #include <sched.h>
 #include <err.h>
@@ -159,7 +159,12 @@ static int parallel_test(u64 features,
 
 	/* Parent and child use separate addresses, to check our mapping logic! */
 	host_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+	if (host_map == MAP_FAILED)
+		err(1, "mmap host_map");
+
 	guest_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+	if (guest_map == MAP_FAILED)
+		err(1, "mmap guest_map");
 
 	pipe_ret = pipe(to_guest);
 	assert(!pipe_ret);
@@ -519,7 +524,7 @@ int main(int argc, char *argv[])
 		errx(1, "virtqueue_add_sgs: %i", err);
 	__kmalloc_fake = NULL;
 
-	/* Host retreives it. */
+	/* Host retrieves it. */
 	vringh_iov_init(&riov, host_riov, ARRAY_SIZE(host_riov));
 	vringh_iov_init(&wiov, host_wiov, ARRAY_SIZE(host_wiov));
 

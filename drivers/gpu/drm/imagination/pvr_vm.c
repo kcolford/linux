@@ -13,7 +13,9 @@
 #include <drm/drm_exec.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gpuvm.h>
+#include <drm/drm_print.h>
 
+#include <linux/bug.h>
 #include <linux/container_of.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -114,6 +116,8 @@ struct pvr_vm_gpuva {
 	struct drm_gpuva base;
 };
 
+#define to_pvr_vm_gpuva(va) container_of_const(va, struct pvr_vm_gpuva, base)
+
 enum pvr_vm_bind_type {
 	PVR_VM_BIND_TYPE_MAP,
 	PVR_VM_BIND_TYPE_UNMAP,
@@ -182,12 +186,17 @@ struct pvr_vm_bind_op {
 static int pvr_vm_bind_op_exec(struct pvr_vm_bind_op *bind_op)
 {
 	switch (bind_op->type) {
-	case PVR_VM_BIND_TYPE_MAP:
+	case PVR_VM_BIND_TYPE_MAP: {
+		const struct drm_gpuvm_map_req map_req = {
+			.map.va.addr = bind_op->device_addr,
+			.map.va.range = bind_op->size,
+			.map.gem.obj = gem_from_pvr_gem(bind_op->pvr_obj),
+			.map.gem.offset = bind_op->offset,
+		};
+
 		return drm_gpuvm_sm_map(&bind_op->vm_ctx->gpuvm_mgr,
-					bind_op, bind_op->device_addr,
-					bind_op->size,
-					gem_from_pvr_gem(bind_op->pvr_obj),
-					bind_op->offset);
+					bind_op, &map_req);
+	}
 
 	case PVR_VM_BIND_TYPE_UNMAP:
 		return drm_gpuvm_sm_unmap(&bind_op->vm_ctx->gpuvm_mgr,
@@ -247,14 +256,14 @@ pvr_vm_bind_op_map_init(struct pvr_vm_bind_op *bind_op,
 	bind_op->type = PVR_VM_BIND_TYPE_MAP;
 
 	dma_resv_lock(obj->resv, NULL);
-	bind_op->gpuvm_bo = drm_gpuvm_bo_obtain(&vm_ctx->gpuvm_mgr, obj);
+	bind_op->gpuvm_bo = drm_gpuvm_bo_obtain_locked(&vm_ctx->gpuvm_mgr, obj);
 	dma_resv_unlock(obj->resv);
 	if (IS_ERR(bind_op->gpuvm_bo))
 		return PTR_ERR(bind_op->gpuvm_bo);
 
-	bind_op->new_va = kzalloc(sizeof(*bind_op->new_va), GFP_KERNEL);
-	bind_op->prev_va = kzalloc(sizeof(*bind_op->prev_va), GFP_KERNEL);
-	bind_op->next_va = kzalloc(sizeof(*bind_op->next_va), GFP_KERNEL);
+	bind_op->new_va = kzalloc_obj(*bind_op->new_va);
+	bind_op->prev_va = kzalloc_obj(*bind_op->prev_va);
+	bind_op->next_va = kzalloc_obj(*bind_op->next_va);
 	if (!bind_op->new_va || !bind_op->prev_va || !bind_op->next_va) {
 		err = -ENOMEM;
 		goto err_bind_op_fini;
@@ -290,8 +299,9 @@ err_bind_op_fini:
 
 static int
 pvr_vm_bind_op_unmap_init(struct pvr_vm_bind_op *bind_op,
-			  struct pvr_vm_context *vm_ctx, u64 device_addr,
-			  u64 size)
+			  struct pvr_vm_context *vm_ctx,
+			  struct pvr_gem_object *pvr_obj,
+			  u64 device_addr, u64 size)
 {
 	int err;
 
@@ -300,8 +310,8 @@ pvr_vm_bind_op_unmap_init(struct pvr_vm_bind_op *bind_op,
 
 	bind_op->type = PVR_VM_BIND_TYPE_UNMAP;
 
-	bind_op->prev_va = kzalloc(sizeof(*bind_op->prev_va), GFP_KERNEL);
-	bind_op->next_va = kzalloc(sizeof(*bind_op->next_va), GFP_KERNEL);
+	bind_op->prev_va = kzalloc_obj(*bind_op->prev_va);
+	bind_op->next_va = kzalloc_obj(*bind_op->next_va);
 	if (!bind_op->prev_va || !bind_op->next_va) {
 		err = -ENOMEM;
 		goto err_bind_op_fini;
@@ -315,6 +325,7 @@ pvr_vm_bind_op_unmap_init(struct pvr_vm_bind_op *bind_op,
 		goto err_bind_op_fini;
 	}
 
+	bind_op->pvr_obj = pvr_obj;
 	bind_op->vm_ctx = vm_ctx;
 	bind_op->device_addr = device_addr;
 	bind_op->size = size;
@@ -386,6 +397,7 @@ pvr_vm_gpuva_unmap(struct drm_gpuva_op *op, void *op_ctx)
 
 	drm_gpuva_unmap(&op->unmap);
 	drm_gpuva_unlink(op->unmap.va);
+	kfree(to_pvr_vm_gpuva(op->unmap.va));
 
 	return 0;
 }
@@ -433,6 +445,7 @@ pvr_vm_gpuva_remap(struct drm_gpuva_op *op, void *op_ctx)
 	}
 
 	drm_gpuva_unlink(op->remap.unmap->va);
+	kfree(to_pvr_vm_gpuva(op->remap.unmap->va));
 
 	return 0;
 }
@@ -552,7 +565,7 @@ pvr_vm_create_context(struct pvr_device *pvr_dev, bool is_userspace_context)
 		return ERR_PTR(-EINVAL);
 	}
 
-	vm_ctx = kzalloc(sizeof(*vm_ctx), GFP_KERNEL);
+	vm_ctx = kzalloc_obj(*vm_ctx);
 	if (!vm_ctx)
 		return ERR_PTR(-ENOMEM);
 
@@ -596,8 +609,8 @@ err_free:
  * pvr_vm_context_release() - Teardown a VM context.
  * @ref_count: Pointer to reference counter of the VM context.
  *
- * This function ensures that no mappings are left dangling by unmapping them
- * all in order of ascending device-virtual address.
+ * This function also ensures that no mappings are left dangling by calling
+ * pvr_vm_unmap_all.
  */
 static void
 pvr_vm_context_release(struct kref *ref_count)
@@ -608,8 +621,7 @@ pvr_vm_context_release(struct kref *ref_count)
 	if (vm_ctx->fw_mem_ctx_obj)
 		pvr_fw_object_destroy(vm_ctx->fw_mem_ctx_obj);
 
-	WARN_ON(pvr_vm_unmap(vm_ctx, vm_ctx->gpuvm_mgr.mm_start,
-			     vm_ctx->gpuvm_mgr.mm_range));
+	pvr_vm_unmap_all(vm_ctx);
 
 	pvr_mmu_context_destroy(vm_ctx->mmu_ctx);
 	drm_gem_private_object_fini(&vm_ctx->dummy_gem);
@@ -636,9 +648,7 @@ pvr_vm_context_lookup(struct pvr_file *pvr_file, u32 handle)
 
 	xa_lock(&pvr_file->vm_ctx_handles);
 	vm_ctx = xa_load(&pvr_file->vm_ctx_handles, handle);
-	if (vm_ctx)
-		kref_get(&vm_ctx->ref_count);
-
+	pvr_vm_context_get(vm_ctx);
 	xa_unlock(&pvr_file->vm_ctx_handles);
 
 	return vm_ctx;
@@ -687,11 +697,7 @@ pvr_vm_lock_extra(struct drm_gpuvm_exec *vm_exec)
 	struct pvr_vm_bind_op *bind_op = vm_exec->extra.priv;
 	struct pvr_gem_object *pvr_obj = bind_op->pvr_obj;
 
-	/* Unmap operations don't have an object to lock. */
-	if (!pvr_obj)
-		return 0;
-
-	/* Acquire lock on the GEM being mapped. */
+	/* Acquire lock on the GEM object being mapped/unmapped. */
 	return drm_exec_lock_obj(&vm_exec->exec, gem_from_pvr_gem(pvr_obj));
 }
 
@@ -741,6 +747,63 @@ pvr_vm_map(struct pvr_vm_context *vm_ctx, struct pvr_gem_object *pvr_obj,
 
 	pvr_gem_object_get(pvr_obj);
 
+	mutex_lock(&vm_ctx->lock);
+	err = drm_gpuvm_exec_lock(&vm_exec);
+	if (err)
+		goto err_cleanup;
+
+	err = pvr_vm_bind_op_exec(&bind_op);
+
+	drm_gpuvm_exec_unlock(&vm_exec);
+
+err_cleanup:
+	mutex_unlock(&vm_ctx->lock);
+	pvr_vm_bind_op_fini(&bind_op);
+
+	return err;
+}
+
+/**
+ * pvr_vm_unmap_obj_locked() - Unmap an already mapped section of device-virtual
+ * memory.
+ * @vm_ctx: Target VM context.
+ * @pvr_obj: Target PowerVR memory object.
+ * @device_addr: Virtual device address at the start of the target mapping.
+ * @size: Size of the target mapping.
+ *
+ * Return:
+ *  * 0 on success,
+ *  * -%EINVAL if @device_addr is not a valid page-aligned device-virtual
+ *    address,
+ *  * Any error encountered while performing internal operations required to
+ *    destroy the mapping (returned from pvr_vm_gpuva_unmap or
+ *    pvr_vm_gpuva_remap).
+ *
+ * The vm_ctx->lock must be held when calling this function.
+ */
+static int
+pvr_vm_unmap_obj_locked(struct pvr_vm_context *vm_ctx,
+			struct pvr_gem_object *pvr_obj,
+			u64 device_addr, u64 size)
+{
+	struct pvr_vm_bind_op bind_op = {0};
+	struct drm_gpuvm_exec vm_exec = {
+		.vm = &vm_ctx->gpuvm_mgr,
+		.flags = DRM_EXEC_INTERRUPTIBLE_WAIT |
+			 DRM_EXEC_IGNORE_DUPLICATES,
+		.extra = {
+			.fn = pvr_vm_lock_extra,
+			.priv = &bind_op,
+		},
+	};
+
+	int err = pvr_vm_bind_op_unmap_init(&bind_op, vm_ctx, pvr_obj,
+					    device_addr, size);
+	if (err)
+		return err;
+
+	pvr_gem_object_get(pvr_obj);
+
 	err = drm_gpuvm_exec_lock(&vm_exec);
 	if (err)
 		goto err_cleanup;
@@ -756,6 +819,31 @@ err_cleanup:
 }
 
 /**
+ * pvr_vm_unmap_obj() - Unmap an already mapped section of device-virtual
+ * memory.
+ * @vm_ctx: Target VM context.
+ * @pvr_obj: Target PowerVR memory object.
+ * @device_addr: Virtual device address at the start of the target mapping.
+ * @size: Size of the target mapping.
+ *
+ * Return:
+ *  * 0 on success,
+ *  * Any error encountered by pvr_vm_unmap_obj_locked.
+ */
+int
+pvr_vm_unmap_obj(struct pvr_vm_context *vm_ctx, struct pvr_gem_object *pvr_obj,
+		 u64 device_addr, u64 size)
+{
+	int err;
+
+	mutex_lock(&vm_ctx->lock);
+	err = pvr_vm_unmap_obj_locked(vm_ctx, pvr_obj, device_addr, size);
+	mutex_unlock(&vm_ctx->lock);
+
+	return err;
+}
+
+/**
  * pvr_vm_unmap() - Unmap an already mapped section of device-virtual memory.
  * @vm_ctx: Target VM context.
  * @device_addr: Virtual device address at the start of the target mapping.
@@ -763,43 +851,61 @@ err_cleanup:
  *
  * Return:
  *  * 0 on success,
- *  * -%EINVAL if @device_addr is not a valid page-aligned device-virtual
- *    address,
- *  * Any error encountered while performing internal operations required to
- *    destroy the mapping (returned from pvr_vm_gpuva_unmap or
- *    pvr_vm_gpuva_remap).
+ *  * Any error encountered by drm_gpuva_find,
+ *  * Any error encountered by pvr_vm_unmap_obj_locked.
  */
 int
 pvr_vm_unmap(struct pvr_vm_context *vm_ctx, u64 device_addr, u64 size)
 {
-	struct pvr_vm_bind_op bind_op = {0};
-	struct drm_gpuvm_exec vm_exec = {
-		.vm = &vm_ctx->gpuvm_mgr,
-		.flags = DRM_EXEC_INTERRUPTIBLE_WAIT |
-			 DRM_EXEC_IGNORE_DUPLICATES,
-		.extra = {
-			.fn = pvr_vm_lock_extra,
-			.priv = &bind_op,
-		},
-	};
+	struct pvr_gem_object *pvr_obj;
+	struct drm_gpuva *va;
+	int err;
 
-	int err = pvr_vm_bind_op_unmap_init(&bind_op, vm_ctx, device_addr,
-					    size);
-	if (err)
-		return err;
+	mutex_lock(&vm_ctx->lock);
 
-	err = drm_gpuvm_exec_lock(&vm_exec);
-	if (err)
-		goto err_cleanup;
+	va = drm_gpuva_find(&vm_ctx->gpuvm_mgr, device_addr, size);
+	if (va) {
+		pvr_obj = gem_to_pvr_gem(va->gem.obj);
+		err = pvr_vm_unmap_obj_locked(vm_ctx, pvr_obj,
+					      va->va.addr, va->va.range);
+	} else {
+		err = -ENOENT;
+	}
 
-	err = pvr_vm_bind_op_exec(&bind_op);
-
-	drm_gpuvm_exec_unlock(&vm_exec);
-
-err_cleanup:
-	pvr_vm_bind_op_fini(&bind_op);
+	mutex_unlock(&vm_ctx->lock);
 
 	return err;
+}
+
+/**
+ * pvr_vm_unmap_all() - Unmap all mappings associated with a VM context.
+ * @vm_ctx: Target VM context.
+ *
+ * This function ensures that no mappings are left dangling by unmapping them
+ * all in order of ascending device-virtual address.
+ */
+void
+pvr_vm_unmap_all(struct pvr_vm_context *vm_ctx)
+{
+	mutex_lock(&vm_ctx->lock);
+
+	for (;;) {
+		struct pvr_gem_object *pvr_obj;
+		struct drm_gpuva *va;
+
+		va = drm_gpuva_find_first(&vm_ctx->gpuvm_mgr,
+					  vm_ctx->gpuvm_mgr.mm_start,
+					  vm_ctx->gpuvm_mgr.mm_range);
+		if (!va)
+			break;
+
+		pvr_obj = gem_to_pvr_gem(va->gem.obj);
+
+		WARN_ON(pvr_vm_unmap_obj_locked(vm_ctx, pvr_obj,
+						va->va.addr, va->va.range));
+	}
+
+	mutex_unlock(&vm_ctx->lock);
 }
 
 /* Static data areas are determined by firmware. */
@@ -915,7 +1021,8 @@ copy_out:
 	if (err < 0)
 		return err;
 
-	args->size = sizeof(query);
+	if (args->size > sizeof(query))
+		args->size = sizeof(query);
 	return 0;
 }
 
@@ -965,7 +1072,8 @@ copy_out:
 	if (err < 0)
 		return err;
 
-	args->size = sizeof(query);
+	if (args->size > sizeof(query))
+		args->size = sizeof(query);
 	return 0;
 }
 

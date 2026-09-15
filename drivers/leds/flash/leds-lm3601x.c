@@ -190,7 +190,7 @@ static int lm3601x_brightness_set(struct led_classdev *cdev,
 		goto out;
 	}
 
-	ret = regmap_write(led->regmap, LM3601X_LED_TORCH_REG, brightness);
+	ret = regmap_write(led->regmap, LM3601X_LED_TORCH_REG, brightness - 1);
 	if (ret < 0)
 		goto out;
 
@@ -341,8 +341,9 @@ static int lm3601x_register_leds(struct lm3601x_led *led,
 
 	led_cdev = &led->fled_cdev.led_cdev;
 	led_cdev->brightness_set_blocking = lm3601x_brightness_set;
-	led_cdev->max_brightness = DIV_ROUND_UP(led->torch_current_max,
-						LM3601X_TORCH_REG_DIV);
+	led_cdev->max_brightness =
+			DIV_ROUND_UP(led->torch_current_max - LM3601X_MIN_TORCH_I_UA + 1,
+				     LM3601X_TORCH_REG_DIV);
 	led_cdev->flags |= LED_DEV_CAP_FLASH;
 
 	init_data.fwnode = fwnode;
@@ -384,6 +385,14 @@ static int lm3601x_parse_node(struct lm3601x_led *led,
 		dev_warn(&led->client->dev,
 			"led-max-microamp DT property missing\n");
 		goto out_err;
+	}
+
+	if (led->torch_current_max > LM3601X_MAX_TORCH_I_UA) {
+		dev_warn(&led->client->dev,
+			 "Max torch current set too high (%d vs %d)\n",
+			 led->torch_current_max,
+			 LM3601X_MAX_TORCH_I_UA);
+		led->torch_current_max = LM3601X_MAX_TORCH_I_UA;
 	}
 
 	ret = fwnode_property_read_u32(child, "flash-max-microamp",
@@ -434,6 +443,10 @@ static int lm3601x_probe(struct i2c_client *client)
 		return ret;
 	}
 
+	ret = regmap_write(led->regmap, LM3601X_DEV_ID_REG, LM3601X_SW_RESET);
+	if (ret)
+		dev_warn(&client->dev, "Failed to reset the LED controller\n");
+
 	mutex_init(&led->lock);
 
 	return lm3601x_register_leds(led, fwnode);
@@ -452,8 +465,8 @@ static void lm3601x_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3601x_id[] = {
-	{ "LM36010", CHIP_LM36010 },
-	{ "LM36011", CHIP_LM36011 },
+	{ .name = "LM36010", .driver_data = CHIP_LM36010 },
+	{ .name = "LM36011", .driver_data = CHIP_LM36011 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm3601x_id);

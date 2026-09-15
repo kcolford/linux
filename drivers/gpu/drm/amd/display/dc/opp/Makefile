@@ -25,6 +25,22 @@
 
 ifdef CONFIG_DRM_AMD_DC_FP
 ###############################################################################
+# DCN10
+###############################################################################
+OPP_DCN10 = dcn10_opp.o
+
+AMD_DAL_OPP_DCN10 = $(addprefix $(AMDDALPATH)/dc/opp/dcn10/,$(OPP_DCN10))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_OPP_DCN10)
+###############################################################################
+# DCN20
+###############################################################################
+OPP_DCN20 = dcn20_opp.o
+
+AMD_DAL_OPP_DCN20 = $(addprefix $(AMDDALPATH)/dc/opp/dcn20/,$(OPP_DCN20))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_OPP_DCN20)
+###############################################################################
 # DCN35
 ###############################################################################
 OPP_DCN35 = dcn35_opp.o
@@ -32,4 +48,12 @@ OPP_DCN35 = dcn35_opp.o
 AMD_DAL_OPP_DCN35 = $(addprefix $(AMDDALPATH)/dc/opp/dcn35/,$(OPP_DCN35))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_OPP_DCN35)
+###############################################################################
+# DCN60
+###############################################################################
+OPP_DCN60 = dcn60_opp.o
+
+AMD_DAL_OPP_DCN60 = $(addprefix $(AMDDALPATH)/dc/opp/dcn60/,$(OPP_DCN60))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_OPP_DCN60)
 endif

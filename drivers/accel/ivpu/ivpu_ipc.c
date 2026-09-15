@@ -15,6 +15,7 @@
 #include "ivpu_ipc.h"
 #include "ivpu_jsm_msg.h"
 #include "ivpu_pm.h"
+#include "ivpu_trace.h"
 
 #define IPC_MAX_RX_MSG	128
 
@@ -78,7 +79,7 @@ ivpu_ipc_tx_prepare(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons,
 		return -ENOMEM;
 	}
 
-	tx_buf = ivpu_to_cpu_addr(ipc->mem_tx, tx_buf_vpu_addr);
+	tx_buf = ivpu_to_cpu_addr(ipc->mem_tx, tx_buf_vpu_addr, sizeof(*tx_buf));
 	if (drm_WARN_ON(&vdev->drm, !tx_buf)) {
 		gen_pool_free(ipc->mm_tx, tx_buf_vpu_addr, sizeof(*tx_buf));
 		return -EIO;
@@ -96,7 +97,11 @@ ivpu_ipc_tx_prepare(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons,
 
 	memset(tx_buf, 0, sizeof(*tx_buf));
 	tx_buf->ipc.data_addr = jsm_vpu_addr;
-	/* TODO: Set data_size to actual JSM message size, not union of all messages */
+	/*
+	 * Firmware expects full JSM message size regardless of the payload size.
+	 * Unused fields must be zeroed to allow future extensions of existing
+	 * commands without breaking compatibility.
+	 */
 	tx_buf->ipc.data_size = sizeof(*req);
 	tx_buf->ipc.channel = cons->channel;
 	tx_buf->ipc.src_node = 0;
@@ -140,9 +145,8 @@ ivpu_ipc_rx_msg_add(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons,
 	struct ivpu_ipc_rx_msg *rx_msg;
 
 	lockdep_assert_held(&ipc->cons_lock);
-	lockdep_assert_irqs_disabled();
 
-	rx_msg = kzalloc(sizeof(*rx_msg), GFP_ATOMIC);
+	rx_msg = kmem_cache_zalloc(ipc->rx_msg_cache, GFP_ATOMIC);
 	if (!rx_msg) {
 		ivpu_ipc_rx_mark_free(vdev, ipc_hdr, jsm_msg);
 		return;
@@ -170,7 +174,7 @@ ivpu_ipc_rx_msg_del(struct ivpu_device *vdev, struct ivpu_ipc_rx_msg *rx_msg)
 	list_del(&rx_msg->link);
 	ivpu_ipc_rx_mark_free(vdev, rx_msg->ipc_hdr, rx_msg->jsm_msg);
 	atomic_dec(&vdev->ipc->rx_msg_count);
-	kfree(rx_msg);
+	kmem_cache_free(vdev->ipc->rx_msg_cache, rx_msg);
 }
 
 void ivpu_ipc_consumer_add(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons,
@@ -227,6 +231,7 @@ int ivpu_ipc_send(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons, stru
 		goto unlock;
 
 	ivpu_ipc_tx(vdev, cons->tx_vpu_addr);
+	trace_jsm("[tx]", req);
 
 unlock:
 	mutex_unlock(&ipc->lock);
@@ -275,15 +280,16 @@ int ivpu_ipc_receive(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons,
 	if (ipc_buf)
 		memcpy(ipc_buf, rx_msg->ipc_hdr, sizeof(*ipc_buf));
 	if (rx_msg->jsm_msg) {
-		u32 size = min_t(int, rx_msg->ipc_hdr->data_size, sizeof(*jsm_msg));
+		u32 size = min(rx_msg->ipc_hdr->data_size, sizeof(*jsm_msg));
 
 		if (rx_msg->jsm_msg->result != VPU_JSM_STATUS_SUCCESS) {
-			ivpu_dbg(vdev, IPC, "IPC resp result error: %d\n", rx_msg->jsm_msg->result);
+			ivpu_err(vdev, "IPC resp result error: %d\n", rx_msg->jsm_msg->result);
 			ret = -EBADMSG;
 		}
 
 		if (jsm_msg)
 			memcpy(jsm_msg, rx_msg->jsm_msg, size);
+		trace_jsm("[rx]", rx_msg->jsm_msg);
 	}
 
 	ivpu_ipc_rx_msg_del(vdev, rx_msg);
@@ -291,14 +297,16 @@ int ivpu_ipc_receive(struct ivpu_device *vdev, struct ivpu_ipc_consumer *cons,
 	return ret;
 }
 
-static int
+int
 ivpu_ipc_send_receive_internal(struct ivpu_device *vdev, struct vpu_jsm_msg *req,
 			       enum vpu_ipc_msg_type expected_resp_type,
-			       struct vpu_jsm_msg *resp, u32 channel,
-			       unsigned long timeout_ms)
+			       struct vpu_jsm_msg *resp, u32 channel, unsigned long timeout_ms)
 {
 	struct ivpu_ipc_consumer cons;
 	int ret;
+
+	drm_WARN_ON(&vdev->drm, pm_runtime_status_suspended(vdev->drm.dev) &&
+		    pm_runtime_enabled(vdev->drm.dev));
 
 	ivpu_ipc_consumer_add(vdev, &cons, channel, NULL);
 
@@ -325,19 +333,21 @@ consumer_del:
 	return ret;
 }
 
-int ivpu_ipc_send_receive_active(struct ivpu_device *vdev, struct vpu_jsm_msg *req,
-				 enum vpu_ipc_msg_type expected_resp, struct vpu_jsm_msg *resp,
-				 u32 channel, unsigned long timeout_ms)
+int ivpu_ipc_send_receive(struct ivpu_device *vdev, struct vpu_jsm_msg *req,
+			  enum vpu_ipc_msg_type expected_resp, struct vpu_jsm_msg *resp,
+			  u32 channel, unsigned long timeout_ms)
 {
 	struct vpu_jsm_msg hb_req = { .type = VPU_JSM_MSG_QUERY_ENGINE_HB };
 	struct vpu_jsm_msg hb_resp;
 	int ret, hb_ret;
 
-	drm_WARN_ON(&vdev->drm, pm_runtime_status_suspended(vdev->drm.dev));
+	ret = ivpu_rpm_get(vdev);
+	if (ret < 0)
+		return ret;
 
 	ret = ivpu_ipc_send_receive_internal(vdev, req, expected_resp, resp, channel, timeout_ms);
 	if (ret != -ETIMEDOUT)
-		return ret;
+		goto rpm_put;
 
 	hb_ret = ivpu_ipc_send_receive_internal(vdev, &hb_req, VPU_JSM_MSG_QUERY_ENGINE_HB_DONE,
 						&hb_resp, VPU_IPC_CHAN_ASYNC_CMD,
@@ -345,21 +355,33 @@ int ivpu_ipc_send_receive_active(struct ivpu_device *vdev, struct vpu_jsm_msg *r
 	if (hb_ret == -ETIMEDOUT)
 		ivpu_pm_trigger_recovery(vdev, "IPC timeout");
 
+rpm_put:
+	ivpu_rpm_put(vdev);
 	return ret;
 }
 
-int ivpu_ipc_send_receive(struct ivpu_device *vdev, struct vpu_jsm_msg *req,
-			  enum vpu_ipc_msg_type expected_resp, struct vpu_jsm_msg *resp,
-			  u32 channel, unsigned long timeout_ms)
+int ivpu_ipc_send_and_wait(struct ivpu_device *vdev, struct vpu_jsm_msg *req,
+			   u32 channel, unsigned long timeout_ms)
 {
+	struct ivpu_ipc_consumer cons;
 	int ret;
 
 	ret = ivpu_rpm_get(vdev);
 	if (ret < 0)
 		return ret;
 
-	ret = ivpu_ipc_send_receive_active(vdev, req, expected_resp, resp, channel, timeout_ms);
+	ivpu_ipc_consumer_add(vdev, &cons, channel, NULL);
 
+	ret = ivpu_ipc_send(vdev, &cons, req);
+	if (ret) {
+		ivpu_warn_ratelimited(vdev, "IPC send failed: %d\n", ret);
+		goto consumer_del;
+	}
+
+	msleep(timeout_ms);
+
+consumer_del:
+	ivpu_ipc_consumer_del(vdev, &cons);
 	ivpu_rpm_put(vdev);
 	return ret;
 }
@@ -398,7 +420,7 @@ void ivpu_ipc_irq_handler(struct ivpu_device *vdev)
 			return;
 		}
 
-		ipc_hdr = ivpu_to_cpu_addr(ipc->mem_rx, vpu_addr);
+		ipc_hdr = ivpu_to_cpu_addr(ipc->mem_rx, vpu_addr, sizeof(*ipc_hdr));
 		if (!ipc_hdr) {
 			ivpu_warn_ratelimited(vdev, "IPC msg 0x%x out of range\n", vpu_addr);
 			continue;
@@ -407,7 +429,8 @@ void ivpu_ipc_irq_handler(struct ivpu_device *vdev)
 
 		jsm_msg = NULL;
 		if (ipc_hdr->channel != IVPU_IPC_CHAN_BOOT_MSG) {
-			jsm_msg = ivpu_to_cpu_addr(ipc->mem_rx, ipc_hdr->data_addr);
+			jsm_msg = ivpu_to_cpu_addr(ipc->mem_rx, ipc_hdr->data_addr,
+						   sizeof(*jsm_msg));
 			if (!jsm_msg) {
 				ivpu_warn_ratelimited(vdev, "JSM msg 0x%x out of range\n",
 						      ipc_hdr->data_addr);
@@ -440,14 +463,11 @@ void ivpu_ipc_irq_handler(struct ivpu_device *vdev)
 			ivpu_ipc_rx_mark_free(vdev, ipc_hdr, jsm_msg);
 		}
 	}
-
-	if (!list_empty(&ipc->cb_msg_list))
-		if (!kfifo_put(&vdev->hw->irq.fifo, IVPU_HW_IRQ_SRC_IPC))
-			ivpu_err_ratelimited(vdev, "IRQ FIFO full\n");
 }
 
-void ivpu_ipc_irq_thread_handler(struct ivpu_device *vdev)
+irqreturn_t ivpu_ipc_irq_thread_handler(int irq, void *ptr)
 {
+	struct ivpu_device *vdev = ptr;
 	struct ivpu_ipc_info *ipc = vdev->ipc;
 	struct ivpu_ipc_rx_msg *rx_msg, *r;
 	struct list_head cb_msg_list;
@@ -462,6 +482,8 @@ void ivpu_ipc_irq_thread_handler(struct ivpu_device *vdev)
 		rx_msg->callback(vdev, rx_msg->ipc_hdr, rx_msg->jsm_msg);
 		ivpu_ipc_rx_msg_del(vdev, rx_msg);
 	}
+
+	return IRQ_HANDLED;
 }
 
 int ivpu_ipc_init(struct ivpu_device *vdev)
@@ -469,10 +491,18 @@ int ivpu_ipc_init(struct ivpu_device *vdev)
 	struct ivpu_ipc_info *ipc = vdev->ipc;
 	int ret;
 
+	ipc->rx_msg_cache = kmem_cache_create("ivpu_ipc_rx_msg", sizeof(struct ivpu_ipc_rx_msg), 0,
+					      SLAB_HWCACHE_ALIGN, NULL);
+	if (!ipc->rx_msg_cache) {
+		ivpu_err(vdev, "Failed to create rx_msg_cache\n");
+		return -ENOMEM;
+	}
+
 	ipc->mem_tx = ivpu_bo_create_global(vdev, SZ_16K, DRM_IVPU_BO_WC | DRM_IVPU_BO_MAPPABLE);
 	if (!ipc->mem_tx) {
 		ivpu_err(vdev, "Failed to allocate mem_tx\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_destroy_cache;
 	}
 
 	ipc->mem_rx = ivpu_bo_create_global(vdev, SZ_16K, DRM_IVPU_BO_WC | DRM_IVPU_BO_MAPPABLE);
@@ -511,6 +541,8 @@ err_free_rx:
 	ivpu_bo_free(ipc->mem_rx);
 err_free_tx:
 	ivpu_bo_free(ipc->mem_tx);
+err_destroy_cache:
+	kmem_cache_destroy(ipc->rx_msg_cache);
 	return ret;
 }
 
@@ -518,12 +550,12 @@ void ivpu_ipc_fini(struct ivpu_device *vdev)
 {
 	struct ivpu_ipc_info *ipc = vdev->ipc;
 
-	drm_WARN_ON(&vdev->drm, ipc->on);
 	drm_WARN_ON(&vdev->drm, !list_empty(&ipc->cons_list));
 	drm_WARN_ON(&vdev->drm, !list_empty(&ipc->cb_msg_list));
 	drm_WARN_ON(&vdev->drm, atomic_read(&ipc->rx_msg_count) > 0);
 
 	ivpu_ipc_mem_fini(vdev);
+	kmem_cache_destroy(ipc->rx_msg_cache);
 }
 
 void ivpu_ipc_enable(struct ivpu_device *vdev)

@@ -15,7 +15,6 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -36,19 +35,14 @@ static struct starfive_dev_list dev_list = {
 
 struct starfive_cryp_dev *starfive_cryp_find_dev(struct starfive_cryp_ctx *ctx)
 {
-	struct starfive_cryp_dev *cryp = NULL, *tmp;
+	struct starfive_cryp_dev *cryp;
 
 	spin_lock_bh(&dev_list.lock);
-	if (!ctx->cryp) {
-		list_for_each_entry(tmp, &dev_list.dev_list, list) {
-			cryp = tmp;
-			break;
-		}
-		ctx->cryp = cryp;
-	} else {
-		cryp = ctx->cryp;
-	}
-
+	if (!ctx->cryp)
+		ctx->cryp = list_first_entry_or_null(&dev_list.dev_list,
+						     struct starfive_cryp_dev,
+						     list);
+	cryp = ctx->cryp;
 	spin_unlock_bh(&dev_list.lock);
 
 	return cryp;
@@ -151,7 +145,7 @@ static int starfive_cryp_probe(struct platform_device *pdev)
 
 	ret = starfive_aes_register_algs();
 	if (ret)
-		goto err_algs_aes;
+		goto err_engine_start;
 
 	ret = starfive_hash_register_algs();
 	if (ret)
@@ -167,8 +161,6 @@ err_algs_rsa:
 	starfive_hash_unregister_algs();
 err_algs_hash:
 	starfive_aes_unregister_algs();
-err_algs_aes:
-	crypto_engine_stop(cryp->engine);
 err_engine_start:
 	crypto_engine_exit(cryp->engine);
 err_engine:
@@ -193,7 +185,6 @@ static void starfive_cryp_remove(struct platform_device *pdev)
 	starfive_hash_unregister_algs();
 	starfive_rsa_unregister_algs();
 
-	crypto_engine_stop(cryp->engine);
 	crypto_engine_exit(cryp->engine);
 
 	starfive_dma_cleanup(cryp);
@@ -215,7 +206,7 @@ MODULE_DEVICE_TABLE(of, starfive_dt_ids);
 
 static struct platform_driver starfive_cryp_driver = {
 	.probe  = starfive_cryp_probe,
-	.remove_new = starfive_cryp_remove,
+	.remove = starfive_cryp_remove,
 	.driver = {
 		.name           = DRIVER_NAME,
 		.of_match_table = starfive_dt_ids,

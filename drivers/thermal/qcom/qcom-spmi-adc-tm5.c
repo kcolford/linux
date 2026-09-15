@@ -18,7 +18,7 @@
 #include <linux/regmap.h>
 #include <linux/thermal.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "../thermal_hwmon.h"
 
@@ -368,9 +368,6 @@ static int adc_tm5_get_temp(struct thermal_zone_device *tz, int *temp)
 	ret = iio_read_channel_processed(channel->iio, temp);
 	if (ret < 0)
 		return ret;
-
-	if (ret != IIO_VAL_INT)
-		return -EINVAL;
 
 	return 0;
 }
@@ -938,7 +935,6 @@ static const struct adc_tm5_data adc_tm5_gen2_data_pmic = {
 static int adc_tm5_get_dt_data(struct adc_tm5_chip *adc_tm, struct device_node *node)
 {
 	struct adc_tm5_channel *channels;
-	struct device_node *child;
 	u32 value;
 	int ret;
 	struct device *dev = adc_tm->dev;
@@ -982,12 +978,10 @@ static int adc_tm5_get_dt_data(struct adc_tm5_chip *adc_tm, struct device_node *
 		adc_tm->avg_samples = VADC_DEF_AVG_SAMPLES;
 	}
 
-	for_each_available_child_of_node(node, child) {
+	for_each_available_child_of_node_scoped(node, child) {
 		ret = adc_tm5_get_dt_channel_data(adc_tm, channels, child);
-		if (ret) {
-			of_node_put(child);
+		if (ret)
 			return ret;
-		}
 
 		channels++;
 	}
@@ -1072,3 +1066,4 @@ module_platform_driver(adc_tm5_driver);
 
 MODULE_DESCRIPTION("SPMI PMIC Thermal Monitor ADC driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

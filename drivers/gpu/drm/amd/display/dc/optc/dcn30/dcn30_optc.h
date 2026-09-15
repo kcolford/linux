@@ -28,7 +28,9 @@
 
 #include "dcn20/dcn20_optc.h"
 
-#define V_TOTAL_REGS_DCN30_SRI(inst)
+#define V_TOTAL_REGS_DCN30_SRI(inst) \
+	SRI(OTG_V_TOTAL_MID, OTG, inst),\
+	SRI(OTG_DRR_V_TOTAL_REACH_RANGE, OTG, inst),
 
 #define OPTC_COMMON_REG_LIST_DCN3_BASE(inst) \
 	SRI(OTG_VSTARTUP_PARAM, OTG, inst),\
@@ -109,9 +111,12 @@
 	SRI(OPTC_BYTES_PER_PIXEL, ODM, inst),\
 	SRI(OPTC_WIDTH_CONTROL, ODM, inst),\
 	SRI(OPTC_MEMORY_CONFIG, ODM, inst),\
-	SR(DWB_SOURCE_SELECT)
+	SR(DWB_SOURCE_SELECT),\
+	SRI(OTG_PIPE_UPDATE_STATUS, OTG, inst)
 
-#define DCN30_VTOTAL_REGS_SF(mask_sh)
+#define DCN30_VTOTAL_REGS_SF(mask_sh)\
+	SF(OTG0_OTG_DRR_V_TOTAL_REACH_RANGE, OTG_DRR_V_TOTAL_REACH_LOWER_RANGE, mask_sh),\
+	SF(OTG0_OTG_DRR_V_TOTAL_REACH_RANGE, OTG_DRR_V_TOTAL_REACH_UPPER_RANGE, mask_sh),
 
 #define OPTC_COMMON_MASK_SH_LIST_DCN3_BASE(mask_sh)\
 	SF(OTG0_OTG_VSTARTUP_PARAM, VSTARTUP_START, mask_sh),\
@@ -209,6 +214,7 @@
 	SF(ODM0_OPTC_INPUT_CLOCK_CONTROL, OPTC_INPUT_CLK_GATE_DIS, mask_sh),\
 	SF(ODM0_OPTC_INPUT_GLOBAL_CONTROL, OPTC_UNDERFLOW_OCCURRED_STATUS, mask_sh),\
 	SF(ODM0_OPTC_INPUT_GLOBAL_CONTROL, OPTC_UNDERFLOW_CLEAR, mask_sh),\
+	SF(ODM0_OPTC_INPUT_GLOBAL_CONTROL, OPTC_DOUBLE_BUFFER_PENDING, mask_sh),\
 	SF(VTG0_CONTROL, VTG0_ENABLE, mask_sh),\
 	SF(VTG0_CONTROL, VTG0_FP2, mask_sh),\
 	SF(VTG0_CONTROL, VTG0_VCOUNT_INIT, mask_sh),\
@@ -319,7 +325,11 @@
 	SF(OTG0_OTG_DRR_V_TOTAL_CHANGE, OTG_DRR_V_TOTAL_CHANGE_LIMIT, mask_sh),\
 	SF(OTG0_OTG_H_TIMING_CNTL, OTG_H_TIMING_DIV_MODE, mask_sh),\
 	SF(OTG0_OTG_DOUBLE_BUFFER_CONTROL, OTG_DRR_TIMING_DBUF_UPDATE_PENDING, mask_sh),\
-	SF(OTG0_OTG_DOUBLE_BUFFER_CONTROL, OTG_DRR_TIMING_DBUF_UPDATE_MODE, mask_sh)
+	SF(OTG0_OTG_DOUBLE_BUFFER_CONTROL, OTG_DRR_TIMING_DBUF_UPDATE_MODE, mask_sh),\
+	SF(OTG0_OTG_PIPE_UPDATE_STATUS, OTG_FLIP_PENDING, mask_sh),\
+	SF(OTG0_OTG_PIPE_UPDATE_STATUS, OTG_DC_REG_UPDATE_PENDING, mask_sh),\
+	SF(OTG0_OTG_PIPE_UPDATE_STATUS, OTG_CURSOR_UPDATE_PENDING, mask_sh),\
+	SF(OTG0_OTG_PIPE_UPDATE_STATUS, OTG_VUPDATE_KEEPOUT_STATUS, mask_sh),\
 
 void dcn30_timing_generator_init(struct optc *optc1);
 
@@ -356,4 +366,7 @@ void optc3_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_c
 void optc3_wait_drr_doublebuffer_pending_clear(struct timing_generator *optc);
 void optc3_tg_init(struct timing_generator *optc);
 void optc3_set_vtotal_min_max(struct timing_generator *optc, int vtotal_min, int vtotal_max);
+bool optc3_get_optc_double_buffer_pending(struct timing_generator *optc);
+bool optc3_get_otg_update_pending(struct timing_generator *optc);
+bool optc3_get_pipe_update_pending(struct timing_generator *optc);
 #endif /* __DC_OPTC_DCN30_H__ */

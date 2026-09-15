@@ -10,7 +10,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -321,8 +320,8 @@ static void max197_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max197_device_ids[] = {
-	{ "max197", max197 },
-	{ "max199", max199 },
+	{ .name = "max197", .driver_data = max197 },
+	{ .name = "max199", .driver_data = max199 },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max197_device_ids);
@@ -332,7 +331,7 @@ static struct platform_driver max197_driver = {
 		.name = "max197",
 	},
 	.probe = max197_probe,
-	.remove_new = max197_remove,
+	.remove = max197_remove,
 	.id_table = max197_device_ids,
 };
 module_platform_driver(max197_driver);

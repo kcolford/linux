@@ -25,7 +25,7 @@ static struct fscache_cache *fscache_alloc_cache(const char *name)
 {
 	struct fscache_cache *cache;
 
-	cache = kzalloc(sizeof(*cache), GFP_KERNEL);
+	cache = kzalloc_obj(*cache);
 	if (cache) {
 		if (name) {
 			cache->name = kstrdup(name, GFP_KERNEL);
@@ -237,7 +237,7 @@ int fscache_add_cache(struct fscache_cache *cache,
 {
 	int n_accesses;
 
-	kenter("{%s,%s}", ops->name, cache->name);
+	_enter("{%s,%s}", ops->name, cache->name);
 
 	BUG_ON(fscache_cache_state(cache) != FSCACHE_CACHE_IS_PREPARING);
 
@@ -257,7 +257,7 @@ int fscache_add_cache(struct fscache_cache *cache,
 
 	up_write(&fscache_addremove_sem);
 	pr_notice("Cache \"%s\" added (type %s)\n", cache->name, ops->name);
-	kleave(" = 0 [%s]", cache->name);
+	_leave(" = 0 [%s]", cache->name);
 	return 0;
 }
 EXPORT_SYMBOL(fscache_add_cache);
@@ -372,7 +372,7 @@ void fscache_withdraw_cache(struct fscache_cache *cache)
 EXPORT_SYMBOL(fscache_withdraw_cache);
 
 #ifdef CONFIG_PROC_FS
-static const char fscache_cache_states[NR__FSCACHE_CACHE_STATE] = "-PAEW";
+static const char fscache_cache_states[NR__FSCACHE_CACHE_STATE] __nonstring = "-PAEW";
 
 /*
  * Generate a list of caches in /proc/fs/fscache/caches

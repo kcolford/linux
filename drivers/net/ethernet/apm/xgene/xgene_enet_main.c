@@ -7,7 +7,7 @@
  *	    Keyur Chudgar <kchudgar@apm.com>
  */
 
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include "xgene_enet_main.h"
 #include "xgene_enet_hw.h"
 #include "xgene_enet_sgmac.h"
@@ -2159,7 +2159,7 @@ static struct platform_driver xgene_enet_driver = {
 		   .acpi_match_table = ACPI_PTR(xgene_enet_acpi_match),
 	},
 	.probe = xgene_enet_probe,
-	.remove_new = xgene_enet_remove,
+	.remove = xgene_enet_remove,
 	.shutdown = xgene_enet_shutdown,
 };
 

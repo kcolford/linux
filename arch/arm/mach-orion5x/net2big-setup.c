@@ -17,7 +17,7 @@
 #include <linux/input.h>
 #include <linux/i2c.h>
 #include <linux/ata_platform.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/gpio/machine.h>
 #include <linux/delay.h>
 #include <asm/mach-types.h>
@@ -423,7 +423,7 @@ static void __init net2big_init(void)
 
 	if (gpio_request(NET2BIG_GPIO_POWER_OFF, "power-off") == 0 &&
 	    gpio_direction_output(NET2BIG_GPIO_POWER_OFF, 0) == 0)
-		pm_power_off = net2big_power_off;
+		register_platform_power_off(net2big_power_off);
 	else
 		pr_err("net2big: failed to configure power-off GPIO\n");
 

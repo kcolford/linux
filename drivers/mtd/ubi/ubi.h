@@ -420,7 +420,7 @@ struct ubi_debug_info {
 	unsigned int power_cut_min;
 	unsigned int power_cut_max;
 	unsigned int emulate_failures;
-	char dfs_dir_name[UBI_DFS_DIR_LEN + 1];
+	char dfs_dir_name[UBI_DFS_DIR_LEN];
 	struct dentry *dfs_dir;
 	struct dentry *dfs_chk_gen;
 	struct dentry *dfs_chk_io;
@@ -516,6 +516,22 @@ struct ubi_debug_info {
  * @bgt_thread: background thread description object
  * @thread_enabled: if the background thread is enabled
  * @bgt_name: background thread name
+ * @wl_threshold: Maximum difference between two erase counters. If this
+ *		   threshold is exceeded, the WL sub-system starts moving
+ *		   data from used physical eraseblocks with low erase
+ *		   counter to free physical eraseblocks with high erase counter.
+ * @wl_free_max_diff: When a physical eraseblock is moved, the WL sub-system
+ *		       has to pick the target physical eraseblock to move to.
+ *		       The simplest way would be just to pick the one with the
+ *		       highest erase counter. But in certain workloads this
+ *		       could lead to an unlimited wear of one or few physical
+ *		       eraseblock. Indeed, imagine a situation when the picked
+ *		       physical eraseblock is constantly erased after the
+ *		       data is written to it. So, we have a constant which
+ *		       limits the highest erase counter of the free physical
+ *		       eraseblock to pick. Namely, the WL sub-system does not
+ *		       pick eraseblocks with erase counter greater than the
+ *		       lowest erase counter plus @wl_free_max_diff.
  *
  * @flash_size: underlying MTD device size (in bytes)
  * @peb_count: count of physical eraseblocks on the MTD device
@@ -623,6 +639,8 @@ struct ubi_device {
 	struct task_struct *bgt_thread;
 	int thread_enabled;
 	char bgt_name[sizeof(UBI_BGT_NAME_PATTERN)+2];
+	int wl_threshold;
+	int wl_free_max_diff;
 
 	/* I/O sub-system's stuff */
 	long long flash_size;
@@ -814,7 +832,7 @@ extern struct kmem_cache *ubi_wl_entry_slab;
 extern const struct file_operations ubi_ctrl_cdev_operations;
 extern const struct file_operations ubi_cdev_operations;
 extern const struct file_operations ubi_vol_cdev_operations;
-extern struct class ubi_class;
+extern const struct class ubi_class;
 extern struct mutex ubi_devices_mutex;
 extern struct blocking_notifier_head ubi_notifiers;
 
@@ -831,7 +849,6 @@ void ubi_remove_av(struct ubi_attach_info *ai, struct ubi_ainf_volume *av);
 struct ubi_ainf_peb *ubi_early_get_peb(struct ubi_device *ubi,
 				       struct ubi_attach_info *ai);
 int ubi_attach(struct ubi_device *ubi, int force_scan);
-void ubi_destroy_ai(struct ubi_attach_info *ai);
 
 /* vtbl.c */
 int ubi_change_vtbl_record(struct ubi_device *ubi, int idx,
@@ -902,7 +919,7 @@ int self_check_eba(struct ubi_device *ubi, struct ubi_attach_info *ai_fastmap,
 		   struct ubi_attach_info *ai_scan);
 
 /* wl.c */
-int ubi_sync_erase(struct ubi_device *ubi, struct ubi_wl_entry *e, int torture);
+int ubi_sync_erase(struct ubi_device *ubi, struct ubi_wl_entry *e, int *torture);
 int ubi_wl_get_peb(struct ubi_device *ubi);
 int ubi_wl_put_peb(struct ubi_device *ubi, int vol_id, int lnum,
 		   int pnum, int torture);
@@ -924,7 +941,7 @@ int ubi_io_read(const struct ubi_device *ubi, void *buf, int pnum, int offset,
 		int len);
 int ubi_io_write(struct ubi_device *ubi, const void *buf, int pnum, int offset,
 		 int len);
-int ubi_io_sync_erase(struct ubi_device *ubi, int pnum, int torture);
+int ubi_io_sync_erase(struct ubi_device *ubi, int pnum, int *torture);
 int ubi_io_is_bad(const struct ubi_device *ubi, int pnum);
 int ubi_io_mark_bad(const struct ubi_device *ubi, int pnum);
 int ubi_io_read_ec_hdr(struct ubi_device *ubi, int pnum,
@@ -939,7 +956,8 @@ int ubi_io_write_vid_hdr(struct ubi_device *ubi, int pnum,
 /* build.c */
 int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 		       int vid_hdr_offset, int max_beb_per1024,
-		       bool disable_fm, bool need_resv_pool);
+		       bool disable_fm, bool need_resv_pool,
+		       int wl_threshold);
 int ubi_detach_mtd_dev(int ubi_num, int anyway);
 struct ubi_device *ubi_get_device(int ubi_num);
 void ubi_put_device(struct ubi_device *ubi);
@@ -970,10 +988,22 @@ int ubi_scan_fastmap(struct ubi_device *ubi, struct ubi_attach_info *ai,
 		     struct ubi_attach_info *scan_ai);
 int ubi_fastmap_init_checkmap(struct ubi_volume *vol, int leb_count);
 void ubi_fastmap_destroy_checkmap(struct ubi_volume *vol);
+static inline void ubi_free_fastmap(struct ubi_device *ubi)
+{
+	if (ubi->fm) {
+		int i;
+
+		for (i = 0; i < ubi->fm->used_blocks; i++)
+			kmem_cache_free(ubi_wl_entry_slab, ubi->fm->e[i]);
+		kfree(ubi->fm);
+		ubi->fm = NULL;
+	}
+}
 #else
 static inline int ubi_update_fastmap(struct ubi_device *ubi) { return 0; }
 static inline int ubi_fastmap_init_checkmap(struct ubi_volume *vol, int leb_count) { return 0; }
 static inline void ubi_fastmap_destroy_checkmap(struct ubi_volume *vol) {}
+static inline void ubi_free_fastmap(struct ubi_device *ubi) { }
 #endif
 
 /* block.c */
@@ -1089,7 +1119,7 @@ ubi_alloc_vid_buf(const struct ubi_device *ubi, gfp_t gfp_flags)
 	struct ubi_vid_io_buf *vidb;
 	void *buf;
 
-	vidb = kzalloc(sizeof(*vidb), gfp_flags);
+	vidb = kzalloc_obj(*vidb, gfp_flags);
 	if (!vidb)
 		return NULL;
 

@@ -75,7 +75,7 @@ struct drm_display_mode *drm_mode_create(struct drm_device *dev)
 {
 	struct drm_display_mode *nmode;
 
-	nmode = kzalloc(sizeof(struct drm_display_mode), GFP_KERNEL);
+	nmode = kzalloc_obj(struct drm_display_mode);
 	if (!nmode)
 		return NULL;
 
@@ -539,7 +539,6 @@ static int fill_analog_mode(struct drm_device *dev,
  * to reach those resolutions.
  *
  * Returns:
- *
  * A pointer to the mode, allocated with drm_mode_create(). Returns NULL
  * on error.
  */
@@ -1283,18 +1282,14 @@ EXPORT_SYMBOL(drm_mode_set_name);
  * @mode: mode
  *
  * Returns:
- * @modes's vrefresh rate in Hz, rounded to the nearest integer. Calculates the
- * value first if it is not yet set.
+ * @modes's vrefresh rate in Hz, rounded to the nearest integer.
  */
 int drm_mode_vrefresh(const struct drm_display_mode *mode)
 {
-	unsigned int num, den;
+	unsigned int num = 1, den = 1;
 
 	if (mode->htotal == 0 || mode->vtotal == 0)
 		return 0;
-
-	num = mode->clock;
-	den = mode->htotal * mode->vtotal;
 
 	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
 		num *= 2;
@@ -1302,6 +1297,12 @@ int drm_mode_vrefresh(const struct drm_display_mode *mode)
 		den *= 2;
 	if (mode->vscan > 1)
 		den *= mode->vscan;
+
+	if (check_mul_overflow(mode->clock, num, &num))
+		return 0;
+
+	if (check_mul_overflow(mode->htotal * mode->vtotal, den, &den))
+		return 0;
 
 	return DIV_ROUND_CLOSEST_ULL(mul_u32_u32(num, 1000), den);
 }
@@ -1468,6 +1469,25 @@ struct drm_display_mode *drm_mode_duplicate(struct drm_device *dev,
 }
 EXPORT_SYMBOL(drm_mode_duplicate);
 
+static bool drm_mode_match_timings_vrr(const struct drm_display_mode *mode1,
+				       const struct drm_display_mode *mode2)
+{
+	int mode1_vsync_start_offset = mode1->vtotal - mode1->vsync_start;
+	int mode1_vsync_end_offset = mode1->vtotal - mode1->vsync_end;
+	int mode2_vsync_start_offset = mode2->vtotal - mode2->vsync_start;
+	int mode2_vsync_end_offset = mode2->vtotal - mode2->vsync_end;
+
+	return mode1->hdisplay == mode2->hdisplay &&
+		mode1->hsync_start == mode2->hsync_start &&
+		mode1->hsync_end == mode2->hsync_end &&
+		mode1->htotal == mode2->htotal &&
+		mode1->hskew == mode2->hskew &&
+		mode1->vdisplay == mode2->vdisplay &&
+		mode1_vsync_start_offset == mode2_vsync_start_offset &&
+		mode1_vsync_end_offset == mode2_vsync_end_offset &&
+		mode1->vscan == mode2->vscan;
+}
+
 static bool drm_mode_match_timings(const struct drm_display_mode *mode1,
 				   const struct drm_display_mode *mode2)
 {
@@ -1535,6 +1555,10 @@ bool drm_mode_match(const struct drm_display_mode *mode1,
 		return true;
 
 	if (!mode1 || !mode2)
+		return false;
+
+	if (match_flags & DRM_MODE_MATCH_TIMINGS_VRR &&
+	    !drm_mode_match_timings_vrr(mode1, mode2))
 		return false;
 
 	if (match_flags & DRM_MODE_MATCH_TIMINGS &&

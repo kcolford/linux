@@ -2,21 +2,13 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _SH_CSS_INTERNAL_H_
 #define _SH_CSS_INTERNAL_H_
 
 #include <linux/build_bug.h>
+#include <linux/math.h>
 #include <linux/stdarg.h>
 
 #include <system_global.h>
@@ -88,7 +80,7 @@
 
 #define SH_CSS_MAX_SP_THREADS		5
 
-/**
+/*
  * The C99 standard does not specify the exact object representation of structs;
  * the representation is compiler dependent.
  *
@@ -104,7 +96,6 @@
  * the SIZE_OF_XXX macro of the corresponding struct. If they are not
  * equal, functionality will break.
  */
-#define CALC_ALIGNMENT_MEMBER(x, y)	(CEIL_MUL(x, y) - x)
 #define SIZE_OF_HRT_VADDRESS		sizeof(hive_uint32)
 
 /* Number of SP's */
@@ -344,7 +335,14 @@ struct sh_css_sp_input_formatter_set {
 
 #define IA_CSS_MIPI_SIZE_CHECK_MAX_NOF_ENTRIES_PER_PORT (3)
 
-/* SP configuration information */
+/*
+ * SP configuration information
+ *
+ * This struct is part of the atomisp firmware ABI and is directly copied
+ * to ISP DRAM by sh_css_store_sp_group_to_ddr()
+ *
+ * Do NOT change this struct's layout or remove seemingly unused fields!
+ */
 struct sh_css_sp_config {
 	u8			no_isp_sync; /* Signal host immediately after start */
 	u8			enable_raw_pool_locking; /** Enable Raw Buffer Locking for HALv3 Support */
@@ -354,6 +352,10 @@ struct sh_css_sp_config {
 	     host (true) or when they are passed to the preview/video pipe
 	     (false). */
 
+	 /*
+	  * Note the fields below are only used on the ISP2400 not on the ISP2401,
+	  * sh_css_store_sp_group_to_ddr() skip copying these when run on the ISP2401.
+	  */
 	struct {
 		u8					a_changed;
 		u8					b_changed;
@@ -363,11 +365,13 @@ struct sh_css_sp_config {
 	} input_formatter;
 
 	sync_generator_cfg_t	sync_gen;
+	tpg_cfg_t		tpg;
 	prbs_cfg_t		prbs;
 	input_system_cfg_t	input_circuit;
 	u8			input_circuit_cfg_changed;
-	u32		mipi_sizes_for_check[N_CSI_PORTS][IA_CSS_MIPI_SIZE_CHECK_MAX_NOF_ENTRIES_PER_PORT];
-	u8                 enable_isys_event_queue;
+	u32			mipi_sizes_for_check[N_CSI_PORTS][IA_CSS_MIPI_SIZE_CHECK_MAX_NOF_ENTRIES_PER_PORT];
+	/* These last 2 fields are used on both the ISP2400 and the ISP2401 */
+	u8			enable_isys_event_queue;
 	u8			disable_cont_vf;
 };
 
@@ -634,7 +638,7 @@ struct sh_css_sp_output {
 	unsigned int		sw_interrupt_value[SH_CSS_NUM_SDW_IRQS];
 };
 
-/**
+/*
  * @brief Data structure for the circular buffer.
  * The circular buffer is empty if "start == end". The
  * circular buffer is full if "(end + 1) % size == start".
@@ -700,13 +704,11 @@ struct sh_css_hmm_buffer {
 
 /* Do not use sizeof(uint64_t) since that does not exist of SP */
 #define SIZE_OF_SH_CSS_HMM_BUFFER_STRUCT				\
-	(SIZE_OF_PAYLOAD_UNION +					\
-	CALC_ALIGNMENT_MEMBER(SIZE_OF_PAYLOAD_UNION, 8) +		\
+	(round_up(SIZE_OF_PAYLOAD_UNION, 8) +		\
 	8 +						\
 	8 +						\
 	SIZE_OF_IA_CSS_TIME_MEAS_STRUCT +				\
-	SIZE_OF_IA_CSS_CLOCK_TICK_STRUCT +			\
-	CALC_ALIGNMENT_MEMBER(SIZE_OF_IA_CSS_CLOCK_TICK_STRUCT, 8))
+	round_up(SIZE_OF_IA_CSS_CLOCK_TICK_STRUCT, 8))
 
 static_assert(sizeof(struct sh_css_hmm_buffer) == SIZE_OF_SH_CSS_HMM_BUFFER_STRUCT);
 

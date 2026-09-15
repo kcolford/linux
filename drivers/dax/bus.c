@@ -10,6 +10,7 @@
 #include "dax-private.h"
 #include "bus.h"
 
+static struct resource dax_regions = DEFINE_RES_MEM_NAMED(0, -1, "DAX Regions");
 static DEFINE_MUTEX(dax_bus_lock);
 
 /*
@@ -39,12 +40,7 @@ static int dax_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
 	return add_uevent_var(env, "MODALIAS=" DAX_DEVICE_MODALIAS_FMT, 0);
 }
 
-static struct dax_device_driver *to_dax_drv(struct device_driver *drv)
-{
-	return container_of(drv, struct dax_device_driver, drv);
-}
-
-static struct dax_id *__dax_match_id(struct dax_device_driver *dax_drv,
+static struct dax_id *__dax_match_id(const struct dax_device_driver *dax_drv,
 		const char *dev_name)
 {
 	struct dax_id *dax_id;
@@ -57,7 +53,7 @@ static struct dax_id *__dax_match_id(struct dax_device_driver *dax_drv,
 	return NULL;
 }
 
-static int dax_match_id(struct dax_device_driver *dax_drv, struct device *dev)
+static int dax_match_id(const struct dax_device_driver *dax_drv, struct device *dev)
 {
 	int match;
 
@@ -68,7 +64,7 @@ static int dax_match_id(struct dax_device_driver *dax_drv, struct device *dev)
 	return match;
 }
 
-static int dax_match_type(struct dax_device_driver *dax_drv, struct device *dev)
+static int dax_match_type(const struct dax_device_driver *dax_drv, struct device *dev)
 {
 	enum dax_driver_type type = DAXDRV_DEVICE_TYPE;
 	struct dev_dax *dev_dax = to_dev_dax(dev);
@@ -113,7 +109,7 @@ static ssize_t do_id_store(struct device_driver *drv, const char *buf,
 	dax_id = __dax_match_id(dax_drv, buf);
 	if (!dax_id) {
 		if (action == ID_ADD) {
-			dax_id = kzalloc(sizeof(*dax_id), GFP_KERNEL);
+			dax_id = kzalloc_obj(*dax_id);
 			if (dax_id) {
 				strscpy(dax_id->dev_name, buf, DAX_NAME_LEN);
 				list_add(&dax_id->list, &dax_drv->ids);
@@ -156,7 +152,7 @@ static struct attribute *dax_drv_attrs[] = {
 };
 ATTRIBUTE_GROUPS(dax_drv);
 
-static int dax_bus_match(struct device *dev, struct device_driver *drv);
+static int dax_bus_match(struct device *dev, const struct device_driver *drv);
 
 /*
  * Static dax regions are regions created by an external subsystem
@@ -250,9 +246,9 @@ static const struct bus_type dax_bus_type = {
 	.drv_groups = dax_drv_groups,
 };
 
-static int dax_bus_match(struct device *dev, struct device_driver *drv)
+static int dax_bus_match(struct device *dev, const struct device_driver *drv)
 {
-	struct dax_device_driver *dax_drv = to_dax_drv(drv);
+	const struct dax_device_driver *dax_drv = to_dax_drv(drv);
 
 	if (dax_match_id(dax_drv, dev))
 		return 1;
@@ -630,6 +626,7 @@ static void dax_region_unregister(void *region)
 
 	sysfs_remove_groups(&dax_region->dev->kobj,
 			dax_region_attribute_groups);
+	release_resource(&dax_region->res);
 	dax_region_put(dax_region);
 }
 
@@ -638,6 +635,7 @@ struct dax_region *alloc_dax_region(struct device *parent, int region_id,
 		unsigned long flags)
 {
 	struct dax_region *dax_region;
+	int rc;
 
 	/*
 	 * The DAX core assumes that it can store its private data in
@@ -653,7 +651,7 @@ struct dax_region *alloc_dax_region(struct device *parent, int region_id,
 			|| !IS_ALIGNED(range_len(range), align))
 		return NULL;
 
-	dax_region = kzalloc(sizeof(*dax_region), GFP_KERNEL);
+	dax_region = kzalloc_obj(*dax_region);
 	if (!dax_region)
 		return NULL;
 
@@ -670,14 +668,25 @@ struct dax_region *alloc_dax_region(struct device *parent, int region_id,
 		.flags = IORESOURCE_MEM | flags,
 	};
 
-	if (sysfs_create_groups(&parent->kobj, dax_region_attribute_groups)) {
-		kfree(dax_region);
-		return NULL;
+	rc = request_resource(&dax_regions, &dax_region->res);
+	if (rc) {
+		dev_err(parent, "dax_region resource conflict for %pR\n",
+			&dax_region->res);
+		goto err_res;
 	}
+
+	if (sysfs_create_groups(&parent->kobj, dax_region_attribute_groups))
+		goto err_sysfs;
 
 	if (devm_add_action_or_reset(parent, dax_region_unregister, dax_region))
 		return NULL;
 	return dax_region;
+
+err_sysfs:
+	release_resource(&dax_region->res);
+err_res:
+	dax_region_put(dax_region);
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(alloc_dax_region);
 
@@ -810,7 +819,7 @@ static int devm_register_dax_mapping(struct dev_dax *dev_dax, int range_id)
 				"region disabled\n"))
 		return -ENXIO;
 
-	mapping = kzalloc(sizeof(*mapping), GFP_KERNEL);
+	mapping = kzalloc_obj(*mapping);
 	if (!mapping)
 		return -ENOMEM;
 	mapping->range_id = range_id;
@@ -1420,6 +1429,26 @@ static const struct device_type dev_dax_type = {
 	.groups = dax_attribute_groups,
 };
 
+/* see "strong" declaration in tools/testing/nvdimm/dax-dev.c */
+__weak phys_addr_t dax_pgoff_to_phys(struct dev_dax *dev_dax, pgoff_t pgoff,
+			      unsigned long size)
+{
+	for (int i = 0; i < dev_dax->nr_range; i++) {
+		struct dev_dax_range *dax_range = &dev_dax->ranges[i];
+		struct range *range = &dax_range->range;
+		phys_addr_t phys;
+
+		if (!in_range(pgoff, dax_range->pgoff, PHYS_PFN(range_len(range))))
+			continue;
+		phys = PFN_PHYS(pgoff - dax_range->pgoff) + range->start;
+		if (phys + size - 1 <= range->end)
+			return phys;
+		break;
+	}
+	return -1;
+}
+EXPORT_SYMBOL_GPL(dax_pgoff_to_phys);
+
 static struct dev_dax *__devm_create_dev_dax(struct dev_dax_data *data)
 {
 	struct dax_region *dax_region = data->dax_region;
@@ -1430,7 +1459,7 @@ static struct dev_dax *__devm_create_dev_dax(struct dev_dax_data *data)
 	struct device *dev;
 	int rc;
 
-	dev_dax = kzalloc(sizeof(*dev_dax), GFP_KERNEL);
+	dev_dax = kzalloc_obj(*dev_dax);
 	if (!dev_dax)
 		return ERR_PTR(-ENOMEM);
 
